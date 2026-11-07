@@ -393,7 +393,7 @@ fn script_volume(r: &ScriptRef) -> Volume {
     let items = Some(vec![KeyToPath {
         key: r.key.clone(),
         path: "install.sh".into(),
-        mode: None,
+        ..KeyToPath::default()
     }]);
     let mut v = Volume {
         name: VOLUME_SCRIPT.into(),

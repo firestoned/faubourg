@@ -5,7 +5,7 @@
 
 Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 
-- [x] `banlieue-api` from crates.io, pinned `=0.4.14` (kube ~4.2, k8s-openapi 0.28; ADR-0002 decision 4)
+- [x] `banlieue-api` from crates.io, pinned exactly (`=0.5.0`: kube ~5.0, k8s-openapi 0.29; ADR-0002 decision 4)
 - [x] Host phase machine (Pending, Bootstrapping, Ready, Degraded, Failed) as a pure function, and `Provider` health read fail closed (`crates/faubourg-controller`)
 - [ ] Host reconciler: validate, compute the phase with `phase::decide`, write phase and conditions
 - [x] ADR-0005 amendment: the bootstrap Job and the script source live in the credentials namespace

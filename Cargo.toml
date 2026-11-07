@@ -23,16 +23,16 @@ publish = false
 faubourg-api = { path = "crates/faubourg-api" }
 
 # banlieue's API, for the Provider type (ADR-0002 decision 4), from crates.io. Pinned exactly:
-# banlieue is pre-1.0 and a 0.4.x release can change a schema, so a change reaches faubourg
-# only when this pin moves (a Dependabot PR), and then fails to compile instead of drifting
-# at runtime. Move it in step with the kube pin below.
-banlieue-api = "=0.4.14"
+# banlieue is pre-1.0 and any release can change a schema, so a change reaches faubourg only
+# when this pin moves (a Dependabot PR), and then fails to compile instead of drifting at
+# runtime. Move it in step with the kube pin below.
+banlieue-api = "=0.5.0"
 
-# kubernetes. Pinned to the same majors as banlieue-api (kube ~4.2, k8s-openapi 0.28), which
+# kubernetes. Pinned to the same majors as banlieue-api (kube ~5.0, k8s-openapi 0.29), which
 # this project consumes for the Provider type (ADR-0002). Two kube majors in one graph break
 # kube::Resource across them, so banlieue moves first, then this pin.
-kube        = { version = "~4.2", default-features = false, features = ["derive"] }
-k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
+kube        = { version = "~5.0", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "0.29", features = ["latest", "schemars"] }
 schemars    = "1"
 
 # serde + formats
