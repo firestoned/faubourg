@@ -41,9 +41,9 @@ banlieue has already verified on hosts.
    and zone-level health (ADR-0007). In vCenter terms banlieue is the per-host ESXi agent and
    the DRS placement, and faubourg is the inventory, the cluster objects and "add host".
 4. faubourg is a separate repository and consumes `banlieue-api` from crates.io for the
-   `Provider` type, pinned to an exact version (`=0.4.14`). banlieue publishes the crate
-   (banlieue ADR-0100), so no git source is needed, and `cargo deny` allows none. banlieue
-   never imports faubourg.
+   `Provider` type, pinned to an exact version (the pin lives in `Cargo.toml`). banlieue
+   publishes the crate (banlieue ADR-0100), so no git source is needed, and `cargo deny`
+   allows none. banlieue never imports faubourg.
 
    *Amended 2026-11-07:* this decision first named a git dependency pinned by commit rev, as
    mediatore does. The crates.io release gives the same guarantee (a schema change arrives
@@ -55,8 +55,9 @@ banlieue has already verified on hosts.
   on every hypervisor.
 - The contract with banlieue is CRDs only: faubourg writes `Provider` objects and reads
   their status and Leases. Schema drift is caught at compile time by the pin.
-- faubourg's kube and k8s-openapi versions follow banlieue-api's (kube ~4.2, k8s-openapi
-  0.28 today).
+- faubourg's kube and k8s-openapi versions follow banlieue-api's: banlieue moves first, then
+  faubourg moves its pin and kube together. Two kube majors in one build would leave banlieue's
+  `Provider` implementing the other major's `Resource`, so the reconciler could not watch it.
 - Anything faubourg wants from a host that the banlieue provider does not publish is a
   banlieue change first.
 - Supersedes the design sketch's "host agent", "scheduler" and milestone 2 and 3.

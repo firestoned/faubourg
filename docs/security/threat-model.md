@@ -159,7 +159,7 @@ flowchart LR
   namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
   against a real API server (`make vap-test`).
 - The controller holds no access to Secrets or ConfigMaps (`deploy/rbac/controller.yaml`).
-- Supply chain: `banlieue-api` comes from crates.io, pinned exactly (`=0.4.14`, `Cargo.toml`),
+- Supply chain: `banlieue-api` comes from crates.io, pinned to an exact version (`Cargo.toml`),
   and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`). CI
   (`.github/workflows/build.yaml`) verifies commit signatures and DCO sign-off, runs
   cargo-audit and cargo-deny, and refuses real infrastructure identifiers; every third-party

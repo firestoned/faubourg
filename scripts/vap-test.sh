@@ -51,7 +51,7 @@ kubectl -n "$CREDS" create secret generic hv02-ssh --from-literal=username=faubo
 kubectl -n "$CREDS" create configmap faubourg-install --from-literal=install.sh='#!/bin/sh' >/dev/null
 kubectl -n "$CREDS" create configmap other-script --from-literal=install.sh='#!/bin/sh' >/dev/null
 
-GOOD="$(cd "$ROOT" && cargo run -q -p faubourg-controller --example bootstrap-job -- "$IMAGE" | jq -c .)"
+GOOD="$(cd "$ROOT" && FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" cargo run -q -p faubourg-controller --example bootstrap-job | jq -c .)"
 # The fixture Host does not exist here; without its owner the garbage collector would delete
 # the Job that is really created.
 GOOD="$(jq -c 'del(.metadata.ownerReferences)' <<<"$GOOD")"
