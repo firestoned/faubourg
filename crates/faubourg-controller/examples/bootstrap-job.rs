@@ -4,7 +4,11 @@
 //! Prints, as JSON, the bootstrap Job the builder makes for a fixture Host, so
 //! `scripts/vap-test.sh` can submit the controller's real output to a real API server.
 //!
-//! Usage: `cargo run -q -p faubourg-controller --example bootstrap-job -- <image@sha256:...>`
+//! Usage: `FAUBOURG_BOOTSTRAP_IMAGE=<image@sha256:...> cargo run -q -p faubourg-controller
+//! --example bootstrap-job`
+//!
+//! The image comes from the environment, not from `argv`. The builder refuses it unless it is
+//! pinned by digest, so nothing here trusts the value.
 
 use faubourg_api::host::{
     BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, ScriptRef, ScriptSourceKind,
@@ -13,9 +17,8 @@ use faubourg_api::host::{
 use faubourg_controller::job::{BootstrapConfig, bootstrap_job};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = std::env::args()
-        .nth(1)
-        .ok_or("usage: bootstrap-job <image@sha256:...>")?;
+    let image = std::env::var("FAUBOURG_BOOTSTRAP_IMAGE")
+        .map_err(|_| "set FAUBOURG_BOOTSTRAP_IMAGE to an image pinned by digest")?;
     let mut host = Host::new(
         "hv01",
         HostSpec {
