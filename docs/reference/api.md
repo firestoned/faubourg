@@ -38,7 +38,7 @@ tables below.
 `kubectl get hosts` shows `Zone`, `Address`, `Phase` and `Cordoned`.
 
 A Host's name is at most 63 characters: it becomes a label value on its `Provider` and its
-bootstrap Job, and the Job builder refuses a longer one.
+bootstrap Job. The CRD refuses a longer one on create.
 
 ### spec
 
@@ -66,9 +66,9 @@ escape hatch ([ADR-0005](../adr/0005-bootstrap-runs-one-scoped-install-script.md
 | Field | Notes |
 | --- | --- |
 | `phase` | `Pending`, `Bootstrapping`, `Ready`, `Degraded` or `Failed` ([Concepts](../concepts.md#lifecycle-of-a-host)). |
-| `providerRef` | The banlieue `Provider` faubourg created for this host. |
+| `providerRef` | The banlieue `Provider` labelled `faubourg.firestoned.io/host: <host>`, when exactly one is. |
 | `acceptedHostKey` | The fingerprint accepted under `TrustOnFirstUse`, pinned afterwards. |
-| `conditions` | Including `WeakCredential` and `ScriptDrift` when they apply. |
+| `conditions` | `Ready`: `True` only in phase `Ready`. Its reason says why: `AwaitingBootstrapJob`, `BootstrapJobRunning`, `BootstrapJobFailed`, `ScriptDrift`, `HostKeyRefused`, `ZoneNotFound`, `ZoneUnsupported`, `NoScriptSource`, `InvalidSpec`, `AwaitingProvider`, `ProviderAmbiguous`, `ProviderMissing`, `ProviderNotReady`, `HeartbeatNotAlive` or `ProviderHealthy`. |
 | `observedGeneration` | The generation this status describes. |
 | `message` | Human-readable. Never contains secret material or a command line. |
 

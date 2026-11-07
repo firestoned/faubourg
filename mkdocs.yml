@@ -157,6 +157,7 @@ nav:
       - "ADR-0006: SSH credentials": adr/0006-ssh-credentials.md
       - "ADR-0007: Health from the banlieue Provider": adr/0007-health-from-the-banlieue-provider.md
       - "ADR-0008: Bootstrap Jobs under an admission policy": adr/0008-bootstrap-jobs-constrained-by-admission-policy.md
+      - "ADR-0009: The Host reconciler": adr/0009-host-reconciler.md
   - Security:
       - Threat model: security/threat-model.md
   - Development: development.md

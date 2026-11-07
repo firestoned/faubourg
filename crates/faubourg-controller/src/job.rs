@@ -13,9 +13,11 @@
 //! The Job carries Secret *names*, never Secret values.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use faubourg_api::host::{
-    BootstrapMethod, Host, HostKeyPolicy, HostStatus, ScriptRef, ScriptSourceKind, SshSpec,
+    BootstrapMethod, Host, HostKeyPolicy, HostSpec, HostStatus, ScriptRef, ScriptSourceKind,
+    SshSpec,
 };
 use faubourg_api::validation::Invalid;
 use faubourg_api::{GROUP, LABEL_HOST, VERSION};
@@ -23,12 +25,16 @@ use k8s_openapi::api::batch::v1::{
     Job, JobSpec, PodFailurePolicy, PodFailurePolicyOnExitCodesRequirement, PodFailurePolicyRule,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMapVolumeSource, Container, EnvVar, KeyToPath, PodSecurityContext, PodSpec,
-    PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretVolumeSource, SecurityContext,
-    Volume, VolumeMount,
+    Capabilities, ConfigMapVolumeSource, Container, EnvVar, KeyToPath, Pod, PodSecurityContext,
+    PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretVolumeSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::phase::{JobFailure, JobState};
 
 /// Name of the one container.
 pub const CONTAINER: &str = "bootstrap";
@@ -71,6 +77,11 @@ pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 pub const LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 /// Annotation: the Host generation the Job bootstraps.
 pub const ANNOTATION_GENERATION: &str = "faubourg.firestoned.io/generation";
+/// Annotation: the sha256 of the Host's bootstrap inputs (ADR-0009 decision 6). A Host gets
+/// a new Job when this changes, not on every generation.
+pub const ANNOTATION_INPUTS: &str = "faubourg.firestoned.io/bootstrap-inputs";
+/// Label the Job controller puts on a Job's pods.
+pub const LABEL_JOB_NAME: &str = "batch.kubernetes.io/job-name";
 
 /// Retries for a transient failure (an unreachable host, a dropped connection).
 pub const BACKOFF_LIMIT: i32 = 2;
@@ -152,7 +163,7 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 }
 
 /// `repo@sha256:<64 lowercase hex>`, with a non-empty repository.
-fn is_digest_pinned(image: &str) -> bool {
+pub fn is_digest_pinned(image: &str) -> bool {
     image.split_once("@sha256:").is_some_and(|(repo, digest)| {
         !repo.is_empty()
             && digest.len() == 64
@@ -197,6 +208,7 @@ pub fn bootstrap_job(host: &Host, cfg: &BootstrapConfig) -> Result<Job, JobError
         .ok_or(JobError::NoScriptSource)?;
     // validate() refuses Script without ssh, so this cannot fail; fail closed regardless.
     let ssh = spec.ssh.as_ref().ok_or(JobError::NotPersisted("ssh"))?;
+    let inputs = inputs_hash(&spec.address, ssh, script);
 
     let labels: BTreeMap<String, String> = [
         (LABEL_HOST, name),
@@ -229,10 +241,10 @@ pub fn bootstrap_job(host: &Host, cfg: &BootstrapConfig) -> Result<Job, JobError
             name: Some(job_name(name, generation)),
             namespace: Some(cfg.namespace.clone()),
             labels: Some(labels.clone()),
-            annotations: Some(BTreeMap::from([(
-                ANNOTATION_GENERATION.to_string(),
-                generation.to_string(),
-            )])),
+            annotations: Some(BTreeMap::from([
+                (ANNOTATION_GENERATION.to_string(), generation.to_string()),
+                (ANNOTATION_INPUTS.to_string(), inputs),
+            ])),
             owner_references: Some(vec![OwnerReference {
                 api_version: format!("{GROUP}/{VERSION}"),
                 kind: "Host".into(),
@@ -246,6 +258,124 @@ pub fn bootstrap_job(host: &Host, cfg: &BootstrapConfig) -> Result<Job, JobError
         spec: Some(job_spec(labels, pod)),
         status: None,
     })
+}
+
+/// The sha256 of a Host's bootstrap inputs, as the Job's [`ANNOTATION_INPUTS`] carries it
+/// (ADR-0009 decision 6), or `None` for a Host that gets no Job (adopted, or no script
+/// source). The inputs are `address`, `ssh` and the resolved script source; `zoneRef`,
+/// `cordoned` and the image are not, so cordoning a host or upgrading the controller runs
+/// nothing on it.
+pub fn bootstrap_inputs(spec: &HostSpec, default_script: Option<&ScriptRef>) -> Option<String> {
+    if spec.bootstrap.method != BootstrapMethod::Script {
+        return None;
+    }
+    let script = spec.bootstrap.script_ref.as_ref().or(default_script)?;
+    Some(inputs_hash(&spec.address, spec.ssh.as_ref()?, script))
+}
+
+/// The canonical encoding is `serde_json` of this struct: field order is declaration order.
+/// Changing it re-runs every host's install once; a test pins it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Inputs<'a> {
+    address: &'a str,
+    ssh: &'a SshSpec,
+    script: &'a ScriptRef,
+}
+
+fn inputs_hash(address: &str, ssh: &SshSpec, script: &ScriptRef) -> String {
+    // Serializing plain strings, numbers and enums into a Vec cannot fail.
+    let bytes = serde_json::to_vec(&Inputs {
+        address,
+        ssh,
+        script,
+    })
+    .unwrap_or_default();
+    Sha256::digest(&bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        })
+}
+
+/// True when `job` is controlled by the Host with this UID (ADR-0009 decision 3). A Job with
+/// the right labels but another owner, or none, is not the Host's, whoever created it.
+pub fn owned_by(job: &Job, host_uid: &str) -> bool {
+    job.metadata.owner_references.iter().flatten().any(|r| {
+        r.controller == Some(true)
+            && r.kind == "Host"
+            && r.api_version == format!("{GROUP}/{VERSION}")
+            && r.uid == host_uid
+    })
+}
+
+/// The Job's [`ANNOTATION_INPUTS`], if any.
+pub fn job_inputs(job: &Job) -> Option<&str> {
+    job.metadata
+        .annotations
+        .as_ref()?
+        .get(ANNOTATION_INPUTS)
+        .map(String::as_str)
+}
+
+/// The Job's [`ANNOTATION_GENERATION`], or 0 when absent or unreadable.
+pub fn job_generation(job: &Job) -> i64 {
+    job.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANNOTATION_GENERATION))
+        .and_then(|g| g.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A Job's state (ADR-0009 decision 8). `pods` may hold any pods; only those the Job
+/// controls are read, for the `bootstrap` container's exit code.
+pub fn job_state(job: &Job, pods: &[Pod]) -> JobState {
+    let conditions = job
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref())
+        .unwrap_or_default();
+    let holds = |t: &str| {
+        conditions
+            .iter()
+            .any(|c| c.type_ == t && c.status == "True")
+    };
+    if holds("Failed") || holds("FailureTarget") {
+        return JobState::Failed(failure(job, pods));
+    }
+    if holds("Complete") {
+        return JobState::Succeeded;
+    }
+    JobState::Running
+}
+
+fn failure(job: &Job, pods: &[Pod]) -> JobFailure {
+    let Some(uid) = job.metadata.uid.as_deref() else {
+        return JobFailure::Other;
+    };
+    let codes: Vec<i32> = pods
+        .iter()
+        .filter(|p| {
+            p.metadata
+                .owner_references
+                .iter()
+                .flatten()
+                .any(|r| r.controller == Some(true) && r.kind == "Job" && r.uid == uid)
+        })
+        .filter_map(|p| p.status.as_ref()?.container_statuses.as_ref())
+        .flatten()
+        .filter(|c| c.name == CONTAINER)
+        .filter_map(|c| Some(c.state.as_ref()?.terminated.as_ref()?.exit_code))
+        .collect();
+    if codes.contains(&EXIT_SCRIPT_DRIFT) {
+        JobFailure::ScriptDrift
+    } else if codes.contains(&EXIT_HOST_KEY_REFUSED) {
+        JobFailure::HostKeyRefused
+    } else {
+        JobFailure::Other
+    }
 }
 
 /// The container's environment: connection settings only, all literal values.
@@ -903,5 +1033,209 @@ mod tests {
         ] {
             assert!(!s.contains(forbidden), "{forbidden} in {s}");
         }
+    }
+
+    // ----- bootstrap inputs, ownership, state (ADR-0009) ----------------------------------
+
+    fn inputs(h: &Host) -> Option<String> {
+        bootstrap_inputs(&h.spec, cfg().default_script.as_ref())
+    }
+
+    #[test]
+    fn the_job_carries_its_hosts_bootstrap_inputs() {
+        let h = host();
+        let j = build(&h);
+        assert_eq!(job_inputs(&j), inputs(&h).as_deref());
+        assert_eq!(job_generation(&j), h.metadata.generation.unwrap());
+        let hash = inputs(&h).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(
+            hash.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn the_inputs_encoding_is_pinned() {
+        // Changing this value re-runs every host's install once (ADR-0009). Change it only
+        // on purpose, and say so in the commit.
+        assert_eq!(
+            inputs(&host()).as_deref(),
+            Some("c1d9e12afb0fb4aceadd9abf89040374c48471d87ca7ea5940178e64ce2b477c"),
+        );
+    }
+
+    #[test]
+    fn cordon_zone_and_image_are_not_bootstrap_inputs() {
+        let base = inputs(&host());
+        let mut h = host();
+        h.spec.cordoned = true;
+        h.spec.zone_ref = "az2".into();
+        h.metadata.generation = Some(7);
+        assert_eq!(inputs(&h), base);
+        let mut other = cfg();
+        other.image = IMAGE.replace("0123", "4567");
+        assert_eq!(
+            bootstrap_job(&h, &other)
+                .unwrap()
+                .metadata
+                .annotations
+                .unwrap()[ANNOTATION_INPUTS],
+            base.unwrap()
+        );
+    }
+
+    #[test]
+    fn address_ssh_and_script_are_bootstrap_inputs() {
+        let base = inputs(&host());
+        let mut changes: Vec<Host> = Vec::new();
+        let mut h = host();
+        h.spec.address = "hv02.home.example".into();
+        changes.push(h);
+        let mut h = host();
+        h.spec.ssh.as_mut().unwrap().port = 22;
+        changes.push(h);
+        let mut h = host();
+        h.spec.ssh.as_mut().unwrap().secret_ref.name = "hv01-ssh-2".into();
+        changes.push(h);
+        let mut h = host();
+        h.spec.ssh.as_mut().unwrap().host_key_policy = HostKeyPolicy::TrustOnFirstUse;
+        changes.push(h);
+        let mut h = host();
+        h.spec.ssh.as_mut().unwrap().revoke_after_bootstrap = false;
+        changes.push(h);
+        let mut h = host();
+        h.spec.bootstrap.script_ref = Some(ScriptRef {
+            kind: ScriptSourceKind::ConfigMap,
+            name: "other-script".into(),
+            key: DEFAULT_SCRIPT_KEY.into(),
+        });
+        changes.push(h);
+        for h in &changes {
+            assert_ne!(inputs(h), base, "{:?}", h.spec);
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_job_has_no_inputs() {
+        let mut h = host();
+        h.spec.bootstrap.method = BootstrapMethod::None;
+        assert_eq!(inputs(&h), None);
+        let h = host();
+        assert_eq!(bootstrap_inputs(&h.spec, None), None);
+    }
+
+    #[test]
+    fn only_the_hosts_own_jobs_are_its_jobs() {
+        let j = build(&host());
+        assert!(owned_by(&j, "8f6b8a52-0000-4000-8000-000000000001"));
+        assert!(!owned_by(&j, "8f6b8a52-0000-4000-8000-000000000002"));
+        let mut orphan = j.clone();
+        orphan.metadata.owner_references = None;
+        assert!(!owned_by(&orphan, "8f6b8a52-0000-4000-8000-000000000001"));
+        let mut not_controller = j.clone();
+        not_controller.metadata.owner_references.as_mut().unwrap()[0].controller = None;
+        assert!(!owned_by(
+            &not_controller,
+            "8f6b8a52-0000-4000-8000-000000000001"
+        ));
+        let mut other_kind = j;
+        other_kind.metadata.owner_references.as_mut().unwrap()[0].kind = "Zone".into();
+        assert!(!owned_by(
+            &other_kind,
+            "8f6b8a52-0000-4000-8000-000000000001"
+        ));
+    }
+
+    fn with_conditions(types: &[&str]) -> Job {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        let mut j = build(&host());
+        j.metadata.uid = Some("job-uid".into());
+        j.status = Some(JobStatus {
+            conditions: Some(
+                types
+                    .iter()
+                    .map(|t| JobCondition {
+                        type_: (*t).into(),
+                        status: "True".into(),
+                        ..JobCondition::default()
+                    })
+                    .collect(),
+            ),
+            ..JobStatus::default()
+        });
+        j
+    }
+
+    fn exited(job_uid: &str, code: i32) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "name": "bootstrap-hv01-g1-abcde",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1", "kind": "Job", "name": "bootstrap-hv01-g1",
+                    "uid": job_uid, "controller": true
+                }]
+            },
+            "status": { "containerStatuses": [{
+                "name": "bootstrap", "image": "x", "imageID": "", "ready": false,
+                "restartCount": 0,
+                "state": { "terminated": { "exitCode": code } }
+            }]}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_job_with_no_condition_is_running() {
+        assert_eq!(job_state(&with_conditions(&[]), &[]), JobState::Running);
+        assert_eq!(job_state(&build(&host()), &[]), JobState::Running);
+    }
+
+    #[test]
+    fn a_complete_job_succeeded() {
+        assert_eq!(
+            job_state(&with_conditions(&["SuccessCriteriaMet", "Complete"]), &[]),
+            JobState::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_failed_job_is_failed_from_its_first_failure_signal() {
+        for c in [
+            &["FailureTarget"][..],
+            &["Failed"],
+            &["FailureTarget", "Failed"],
+        ] {
+            assert_eq!(
+                job_state(&with_conditions(c), &[]),
+                JobState::Failed(JobFailure::Other),
+                "{c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_failure_cause_is_the_bootstrap_containers_exit_code() {
+        let j = with_conditions(&["Failed"]);
+        for (code, want) in [
+            (EXIT_SCRIPT_DRIFT, JobFailure::ScriptDrift),
+            (EXIT_HOST_KEY_REFUSED, JobFailure::HostKeyRefused),
+            (1, JobFailure::Other),
+        ] {
+            assert_eq!(
+                job_state(&j, &[exited("job-uid", code)]),
+                JobState::Failed(want),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_jobs_pod_says_nothing_about_this_one() {
+        let j = with_conditions(&["Failed"]);
+        assert_eq!(
+            job_state(&j, &[exited("other-uid", EXIT_SCRIPT_DRIFT)]),
+            JobState::Failed(JobFailure::Other)
+        );
     }
 }

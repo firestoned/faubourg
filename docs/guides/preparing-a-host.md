@@ -100,10 +100,26 @@ sudo -n /opt/faubourg/install.sh
 The Host turns `Ready` when the Job succeeded *and* the host's banlieue `Provider` is
 `Ready=True` with an `Alive` heartbeat ([Concepts](../concepts.md#lifecycle-of-a-host)).
 
-Re-bootstrapping is a new generation of the Host spec, or a changed script source. The script
-must therefore be idempotent. The default one is, because banlieue's installer stages are.
+A host is re-bootstrapped when its bootstrap inputs change: `address`, `ssh`, or the script
+source it names ([ADR-0009](../adr/0009-host-reconciler.md) decision 6). Cordoning a host,
+moving it to another zone, or upgrading the controller runs nothing on it. The script must
+still be idempotent; the default one is, because banlieue's installer stages are.
+
+A failed bootstrap is not retried by the controller: the Job stays as the record and the Host
+stays `Failed`. Fix the cause, then change the inputs or delete the Job
+(`kubectl -n faubourg-credentials delete job <name>`); the controller creates a new one.
+
+Editing the script's content under the same ConfigMap name does not re-run anything yet.
 
 ## Adopting a host that already runs banlieue
 
-Set `bootstrap.method: None`. faubourg creates no Job, needs no SSH settings, and only labels
-the existing `Provider` and reports its health.
+Set `bootstrap.method: None`. faubourg creates no Job, needs no SSH settings, and reports the
+health of the host's `Provider`. Until faubourg creates and labels Providers itself
+(roadmap 01), label the existing one with the host's name:
+
+```sh
+kubectl -n banlieue-system label provider <provider> faubourg.firestoned.io/host=<host>
+```
+
+Exactly one Provider may carry that label. With two, the Host reports `ProviderAmbiguous`
+and is never `Ready`.

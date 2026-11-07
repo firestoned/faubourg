@@ -22,8 +22,8 @@
     {
       "unique-id": "service-host-controller",
       "node-type": "service",
-      "name": "Host controller (planned, roadmap 01)",
-      "description": "Reconciles Host: validates the zone, creates the bootstrap Job, creates and labels the host's banlieue Provider, derives the phase from the Job and the Provider (ADR-0005, ADR-0007). Never reads SSH Secrets."
+      "name": "Host controller",
+      "description": "The faubourg-controller Deployment in faubourg-system, one replica (ADR-0009). Reconciles Host: gates on the zone, creates the bootstrap Job when the Host's bootstrap inputs change and deletes stale ones, derives the phase from the Job and the host's labelled Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets or ConfigMaps. Creating and labelling the Provider is planned (roadmap 01)."
     },
     {
       "unique-id": "service-zone-controller",
@@ -34,8 +34,8 @@
     {
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
-      "name": "Bootstrap Job (planned, roadmap 01)",
-      "description": "One Kubernetes Job per Host generation, in the credentials namespace (ADR-0005 decision 5). Runs faubourg's digest-pinned bootstrap image, mounts only that host's SSH Secret(s) and an allowlisted install script source, places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006, ADR-0008)."
+      "name": "Bootstrap Job",
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg's digest-pinned bootstrap image, mounts only that host's SSH Secret(s) and an allowlisted install script source, places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006, ADR-0008)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
@@ -200,7 +200,7 @@
     },
     {
       "unique-id": "rel-host-controller-kube",
-      "description": "Watches Host, AvailabilityZone, Job, Pod and Provider; creates Jobs in the credentials namespace and Providers; reads Leases in banlieue's workload namespace. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008).",
+      "description": "Watches Host, AvailabilityZone, its own Jobs (by owner UID) in the credentials namespace and Providers in banlieue's namespace; reads Pods there for a failed Job's exit code; creates and deletes Jobs; applies Host status. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008, ADR-0009).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -331,7 +331,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Creates the host's Provider and owns its zone, host and cordon labels by field manager (ADR-0003).",
+      "description": "Reads the host's Provider, the one labelled faubourg.firestoned.io/host, for its health (ADR-0007, ADR-0009 decision 5). Planned: creates it and owns its zone, host and cordon labels by field manager (ADR-0003).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -358,7 +358,7 @@
         {
           "sequence-number": 2,
           "relationship-unique-id": "rel-host-controller-kube",
-          "description": "Host controller checks the zone is supported and creates the bootstrap Job; phase Bootstrapping."
+          "description": "Host controller checks the zone exists and is supported, then creates the bootstrap Job; phase Bootstrapping."
         },
         {
           "sequence-number": 3,
@@ -373,7 +373,7 @@
         {
           "sequence-number": 5,
           "relationship-unique-id": "rel-host-controller-provider-cr",
-          "description": "Host controller creates the Provider with the zone labels."
+          "description": "Host controller creates the Provider with the zone labels (planned, roadmap 01; until then an operator labels it)."
         },
         {
           "sequence-number": 6,
@@ -403,6 +403,7 @@
     "docs/adr/0005-bootstrap-runs-one-scoped-install-script.md",
     "docs/adr/0006-ssh-credentials.md",
     "docs/adr/0007-health-from-the-banlieue-provider.md",
-    "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md"
+    "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md",
+    "docs/adr/0009-host-reconciler.md"
   ]
 }

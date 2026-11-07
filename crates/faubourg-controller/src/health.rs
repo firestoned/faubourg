@@ -22,11 +22,23 @@ pub enum ProviderHealth {
     NotReady,
     /// `Ready=True`, but the heartbeat is `Stale`, `Absent`, or not yet evaluated.
     NoHeartbeat,
+    /// More than one `Provider` carries the host's label (ADR-0009 decision 5).
+    Ambiguous,
     /// `Ready=True` and the heartbeat is `Alive`.
     Healthy,
 }
 
 impl ProviderHealth {
+    /// Reads the `Provider`s labelled with a host's name: none is [`Self::Missing`], more
+    /// than one is [`Self::Ambiguous`]. faubourg never picks one of several.
+    pub fn of_labelled(providers: &[Provider]) -> Self {
+        match providers {
+            [] => Self::Missing,
+            [one] => Self::of(Some(one)),
+            _ => Self::Ambiguous,
+        }
+    }
+
     /// Reads a host's `Provider`, or its absence.
     pub fn of(provider: Option<&Provider>) -> Self {
         let Some(p) = provider else {
@@ -177,5 +189,20 @@ mod tests {
         ] {
             assert!(!h.is_healthy(), "{h:?}");
         }
+    }
+
+    #[test]
+    fn the_host_has_exactly_one_labelled_provider_or_none_counts() {
+        let healthy = || provider(3, Some(status(Some(ready("True", Some(3))), Some("Alive"))));
+        assert_eq!(ProviderHealth::of_labelled(&[]), ProviderHealth::Missing);
+        assert_eq!(
+            ProviderHealth::of_labelled(&[healthy()]),
+            ProviderHealth::Healthy
+        );
+        assert_eq!(
+            ProviderHealth::of_labelled(&[healthy(), healthy()]),
+            ProviderHealth::Ambiguous
+        );
+        assert!(!ProviderHealth::Ambiguous.is_healthy());
     }
 }

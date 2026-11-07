@@ -1,16 +1,24 @@
 // Copyright (c) 2026 Erick Bourgeois, faubourg
 // SPDX-License-Identifier: Apache-2.0
 
-//! faubourg's controller logic, as pure functions first (roadmap 01).
+//! faubourg's Host controller (ADR-0009, roadmap 01).
+//!
+//! Pure functions first:
 //!
 //! - [`health`]: what a host's banlieue `Provider` says about the host (ADR-0007).
-//! - [`phase`]: the Host phase machine, from its spec, its bootstrap Job and that health.
+//! - [`phase`]: the Host phase machine, from its spec, zone, bootstrap Job and that health.
 //! - [`job`]: the bootstrap Job a Host needs, in the shape the admission policy admits
-//!   (ADR-0008).
+//!   (ADR-0008), and how to read one back.
+//! - [`plan`]: one reconcile, from everything it reads to everything it writes.
+//! - [`config`]: the controller's flags, validated before it starts.
 //!
-//! Nothing here talks to a cluster. The reconcilers that do will call these functions, so
-//! every decision a reconciler makes is covered by a unit test that needs no API server.
+//! [`controller`] is the only module that talks to a cluster. It reads what [`plan`] needs and
+//! carries out what it returns, so every decision the controller makes is covered by a unit
+//! test that needs no API server.
 
+pub mod config;
+pub mod controller;
 pub mod health;
 pub mod job;
 pub mod phase;
+pub mod plan;

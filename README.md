@@ -66,10 +66,11 @@ Job are still planned (accepted risk R-3 in the [threat model](docs/security/thr
 | Area | State |
 | --- | --- |
 | Architecture: [ADR-0001 … ADR-0008](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
+| [ADR-0009](docs/adr/0009-host-reconciler.md): the Host reconciler | proposed |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
-| [`faubourg-controller`](crates/faubourg-controller/): Host phase machine, `Provider` health, bootstrap Job builder | implemented as pure functions, tested |
+| [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); no published image yet |
 | [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
-| Host reconciler and bootstrap image | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
+| Bootstrap image, Provider creation, controller image | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller and cordon | not started ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
@@ -95,9 +96,10 @@ The same pages are published at <https://firestoned.github.io/faubourg/>.
 | Path | What |
 | --- | --- |
 | [`crates/faubourg-api/`](crates/faubourg-api/) | CRD types and validation; `make crds` writes [`deploy/crds/`](deploy/crds/) |
-| [`crates/faubourg-controller/`](crates/faubourg-controller/) | Controller logic, pure functions first |
+| [`crates/faubourg-controller/`](crates/faubourg-controller/) | The Host controller: pure functions first, then the `faubourg-controller` binary |
 | [`deploy/admission/`](deploy/admission/) | The bootstrap admission policy and its parameters |
 | [`deploy/rbac/`](deploy/rbac/) | Namespaces, identities and RBAC for the controller and its Jobs |
+| [`deploy/controller/`](deploy/controller/) | The controller Deployment |
 | [`docs/adr/`](docs/adr/) | Decisions, read first |
 | [`docs/architecture/calm/architecture.json`](docs/architecture/calm/architecture.json) | The architecture as code; diagrams in [`docs/architecture/diagrams/`](docs/architecture/diagrams/) |
 | [`docs/security/threat-model.md`](docs/security/threat-model.md) | STRIDE per trust boundary |

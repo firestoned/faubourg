@@ -22,10 +22,10 @@ From a new Host object to a host banlieue can place VMs on.
 ```mermaid
 flowchart TD
     t1["1. Operator creates the SSH Secret and a Host with zoneRef."]
-    t2["2. Host controller checks the zone is supported and creates the bootstrap Job; phase Bootstrapping."]
+    t2["2. Host controller checks the zone exists and is supported, then creates the bootstrap Job; phase Bootstrapping."]
     t3["3. The Job's pod mounts that host's Secret(s) and the script source."]
     t4["4. The Job verifies the host key, places the script if absent or changed, and runs sudo -n /opt/faubourg/install.sh."]
-    t5["5. Host controller creates the Provider with the zone labels."]
+    t5["5. Host controller creates the Provider with the zone labels (planned, roadmap 01; until then an operator labels it)."]
     t6["6. The host-resident provider starts, renews its Lease and publishes its failure domain."]
     t7["7. Provider Ready and heartbeat Alive: Host Ready; banlieue may place VMs on it."]
     t1 --> t2 --> t3 --> t4 --> t5 --> t6 --> t7
