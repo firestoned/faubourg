@@ -38,6 +38,7 @@ Every CI job calls a Make target, so everything runs the same locally.
 | `make crds-check` | Fail when `deploy/crds/` is stale. |
 | `make calm-validate` | Validate the CALM model. Needs Node.js. |
 | `make calm-diagrams` | Render the Mermaid diagrams from the model. |
+| `make vap-test` | The bootstrap admission policy and controller RBAC against a throwaway kind cluster ([ADR-0008](adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)). Needs kind, kubectl, jq; set `KIND_EXPERIMENTAL_PROVIDER=podman` for rootless podman. Not in CI yet. |
 | `make docs` | Build this site with `mkdocs build --strict`. Needs Poetry. |
 | `make docs-serve` | Serve this site with live reload on port 8000. |
 | `make dco-check` | Every commit since `origin/main` is signed off by its author. |

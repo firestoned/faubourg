@@ -1,0 +1,166 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# The bootstrap admission policy (ADR-0008). Two ValidatingAdmissionPolicies, bound to the
+# credentials namespace only:
+#
+#   faubourg-bootstrap-jobs  every Job there must have the bootstrap shape;
+#   faubourg-bootstrap-pods  only the Job controller creates Pods there, a Pod's spec never
+#                            changes, and no ephemeral container is added.
+#
+# Together they mean a Secret in the credentials namespace reaches only a pod running the
+# digest-pinned bootstrap image, whoever asked for it, cluster-admin included. Parameters
+# come from faubourg-bootstrap-policy in faubourg-system (bootstrap-policy-params.yaml).
+#
+# Rename `faubourg-credentials` in both bindings if the controller is configured with
+# another credentials namespace. Tested against a real API server: `make vap-test`.
+# Requires Kubernetes 1.30 or later.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: faubourg-bootstrap-jobs
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: pod
+      expression: "object.spec.template.spec"
+    - name: c
+      expression: "object.spec.template.spec.containers[0]"
+    - name: scripts
+      expression: >-
+        has(params.data) && 'scriptSources' in params.data
+        ? params.data.scriptSources.split(',') : []
+    - name: volumes
+      expression: >-
+        has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : []
+  validations:
+    - expression: "has(params.data) && 'image' in params.data && 'serviceAccountName' in params.data"
+      message: "faubourg-bootstrap-policy must set image and serviceAccountName"
+    - expression: >-
+        variables.pod.containers.size() == 1 && variables.c.name == 'bootstrap'
+        && (!has(variables.pod.initContainers) || variables.pod.initContainers.size() == 0)
+        && (!has(variables.pod.ephemeralContainers) || variables.pod.ephemeralContainers.size() == 0)
+      message: "a Job here runs exactly one container, named bootstrap, and no init or ephemeral containers"
+    - expression: >-
+        params.data.image.contains('@sha256:') && has(variables.c.image)
+        && variables.c.image == params.data.image
+      message: "a Job here runs the digest-pinned bootstrap image named in faubourg-bootstrap-policy"
+    - expression: >-
+        (!has(variables.c.command) || variables.c.command.size() == 0)
+        && (!has(variables.c.args) || variables.c.args.size() == 0)
+      message: "the bootstrap container takes no command and no arguments"
+    - expression: >-
+        (!has(variables.c.envFrom) || variables.c.envFrom.size() == 0)
+        && (!has(variables.c.env) || variables.c.env.all(e, !has(e.valueFrom)))
+      message: "the bootstrap container's environment is literal values only"
+    - expression: >-
+        variables.volumes.all(v, v.name in ['credentials', 'placement', 'script'])
+        && variables.volumes.exists(v, v.name == 'credentials')
+        && variables.volumes.exists(v, v.name == 'script')
+      message: "a Job here mounts exactly the credentials, optional placement, and script volumes"
+    - expression: >-
+        variables.volumes.all(v, v.name == 'script' || has(v.secret))
+      message: "the credentials and placement volumes are Secrets"
+    - expression: >-
+        variables.volumes.all(v, v.name != 'script'
+          || (has(v.secret) && has(v.secret.secretName) && ('Secret/' + v.secret.secretName) in variables.scripts)
+          || (has(v.configMap) && has(v.configMap.name) && ('ConfigMap/' + v.configMap.name) in variables.scripts))
+      message: "the script volume is a ConfigMap or Secret on the scriptSources allowlist"
+    - expression: >-
+        (!has(variables.c.volumeMounts) || variables.c.volumeMounts.all(m, has(m.readOnly) && m.readOnly))
+        && (!has(variables.c.volumeDevices) || variables.c.volumeDevices.size() == 0)
+      message: "every volume is mounted read-only, and no device is attached"
+    - expression: >-
+        has(variables.pod.serviceAccountName)
+        && variables.pod.serviceAccountName == params.data.serviceAccountName
+        && has(variables.pod.automountServiceAccountToken)
+        && !variables.pod.automountServiceAccountToken
+      message: "a Job here runs as the bootstrap ServiceAccount, with no token mounted"
+    - expression: >-
+        !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork)
+        && !(has(variables.pod.hostPID) && variables.pod.hostPID)
+        && !(has(variables.pod.hostIPC) && variables.pod.hostIPC)
+        && !(has(variables.pod.shareProcessNamespace) && variables.pod.shareProcessNamespace)
+      message: "a Job here shares no host namespace and no process namespace"
+    - expression: >-
+        has(variables.c.securityContext)
+        && has(variables.c.securityContext.runAsNonRoot) && variables.c.securityContext.runAsNonRoot
+        && has(variables.c.securityContext.allowPrivilegeEscalation) && !variables.c.securityContext.allowPrivilegeEscalation
+        && !(has(variables.c.securityContext.privileged) && variables.c.securityContext.privileged)
+        && has(variables.c.securityContext.readOnlyRootFilesystem) && variables.c.securityContext.readOnlyRootFilesystem
+        && has(variables.c.securityContext.capabilities)
+        && has(variables.c.securityContext.capabilities.drop)
+        && 'ALL' in variables.c.securityContext.capabilities.drop
+        && (!has(variables.c.securityContext.capabilities.add) || variables.c.securityContext.capabilities.add.size() == 0)
+      message: "the bootstrap container runs restricted: non-root, no escalation, read-only root, all capabilities dropped"
+    - expression: "has(variables.pod.restartPolicy) && variables.pod.restartPolicy == 'Never'"
+      message: "a bootstrap pod is never restarted in place"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: faubourg-bootstrap-jobs
+spec:
+  policyName: faubourg-bootstrap-jobs
+  validationActions: ["Deny"]
+  paramRef:
+    name: faubourg-bootstrap-policy
+    namespace: faubourg-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: faubourg-credentials
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: faubourg-bootstrap-pods
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  variables:
+    # request.subResource is absent, not empty, on a request for the Pod itself.
+    - name: sub
+      expression: "has(request.subResource) ? request.subResource : ''"
+  validations:
+    - expression: >-
+        request.operation != 'CREATE' || variables.sub != ''
+        || (request.userInfo.username == 'system:serviceaccount:kube-system:job-controller'
+            && has(object.metadata.ownerReferences)
+            && object.metadata.ownerReferences.exists(r,
+                 r.apiVersion == 'batch/v1' && r.kind == 'Job' && has(r.controller) && r.controller))
+      message: "only the Job controller creates Pods here, for a Job it controls"
+    - expression: "variables.sub != 'ephemeralcontainers'"
+      message: "no ephemeral containers here"
+    - expression: >-
+        request.operation != 'UPDATE' || variables.sub != ''
+        || object.spec == oldObject.spec
+      message: "a Pod's spec does not change here"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: faubourg-bootstrap-pods
+spec:
+  policyName: faubourg-bootstrap-pods
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: faubourg-credentials

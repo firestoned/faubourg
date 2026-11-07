@@ -29,7 +29,9 @@ failure domains. faubourg adds what banlieue has no object for
   site, checks its sha256, and runs `banlieue host cloud-hypervisor install`
   ([ADR-0005](docs/adr/0005-bootstrap-runs-one-scoped-install-script.md));
 - **SSH credentials** held in one Secret per host in a dedicated namespace, with strict host
-  keys by default ([ADR-0006](docs/adr/0006-ssh-credentials.md));
+  keys by default ([ADR-0006](docs/adr/0006-ssh-credentials.md)). The controller cannot read
+  them, and an admission policy keeps any Job but the pinned bootstrap image from mounting them
+  ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md));
 - **zone membership** as a label on each host's banlieue `Provider`, so banlieue users target a
   zone with an ordinary `providerSelector`
   ([placing VMs in a zone](docs/guides/zone-placement.md));
@@ -63,10 +65,11 @@ Job are still planned (accepted risk R-3 in the [threat model](docs/security/thr
 
 | Area | State |
 | --- | --- |
-| Architecture: [ADR-0001 … ADR-0007](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
+| Architecture: [ADR-0001 … ADR-0008](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
-| [`faubourg-controller`](crates/faubourg-controller/): Host phase machine, `Provider` health | implemented as pure functions, tested |
-| Host reconciler and bootstrap Job | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
+| [`faubourg-controller`](crates/faubourg-controller/): Host phase machine, `Provider` health, bootstrap Job builder | implemented as pure functions, tested |
+| [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
+| Host reconciler and bootstrap image | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller and cordon | not started ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
@@ -93,6 +96,8 @@ The same pages are published at <https://firestoned.github.io/faubourg/>.
 | --- | --- |
 | [`crates/faubourg-api/`](crates/faubourg-api/) | CRD types and validation; `make crds` writes [`deploy/crds/`](deploy/crds/) |
 | [`crates/faubourg-controller/`](crates/faubourg-controller/) | Controller logic, pure functions first |
+| [`deploy/admission/`](deploy/admission/) | The bootstrap admission policy and its parameters |
+| [`deploy/rbac/`](deploy/rbac/) | Namespaces, identities and RBAC for the controller and its Jobs |
 | [`docs/adr/`](docs/adr/) | Decisions, read first |
 | [`docs/architecture/calm/architecture.json`](docs/architecture/calm/architecture.json) | The architecture as code; diagrams in [`docs/architecture/diagrams/`](docs/architecture/diagrams/) |
 | [`docs/security/threat-model.md`](docs/security/threat-model.md) | STRIDE per trust boundary |
@@ -113,6 +118,7 @@ make crds           # regenerate deploy/crds from the types
 make calm-validate  # validate the CALM model
 make calm-diagrams  # render the Mermaid diagrams
 make docs-serve     # preview the docs site at http://127.0.0.1:8000
+make vap-test       # the admission policy and RBAC against a kind cluster
 ```
 
 Every commit is signed and signed off ([DCO](https://developercertificate.org/)).

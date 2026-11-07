@@ -3,7 +3,7 @@
 
 # ADR-0002: banlieue's host-resident provider is the host agent; faubourg owns inventory, bootstrap and zones
 
-**Status:** Accepted · **Date:** 2026-11-07
+**Status:** Accepted, amended 2026-11-07 (decision 4) · **Date:** 2026-11-07
 
 ## Context
 
@@ -40,9 +40,14 @@ banlieue has already verified on hosts.
    of hosts into availability zones, the remote bootstrap of a new host (ADR-0005, ADR-0006),
    and zone-level health (ADR-0007). In vCenter terms banlieue is the per-host ESXi agent and
    the DRS placement, and faubourg is the inventory, the cluster objects and "add host".
-4. faubourg is a separate repository and consumes `banlieue-api` as a pinned git
-   dependency for the `Provider` type, as mediatore does (mediatore ADR-0002). banlieue never
-   imports faubourg.
+4. faubourg is a separate repository and consumes `banlieue-api` from crates.io for the
+   `Provider` type, pinned to an exact version (`=0.4.14`). banlieue publishes the crate
+   (banlieue ADR-0100), so no git source is needed, and `cargo deny` allows none. banlieue
+   never imports faubourg.
+
+   *Amended 2026-11-07:* this decision first named a git dependency pinned by commit rev, as
+   mediatore does. The crates.io release gives the same guarantee (a schema change arrives
+   only when the pin moves) and keeps the dependency graph on one registry.
 
 ## Consequences
 

@@ -20,8 +20,14 @@ namespace, so a Host cannot point at a Secret anywhere else.
 The two must be different Secrets: validation refuses a Host where they are the same
 (`SharedCredential`), because then the scoped credential would be the privileged one.
 
-Only the bootstrap Job mounts these Secrets, and only its own Host's. The controller never
-reads them.
+Only the bootstrap Job mounts these Secrets, and only its own Host's. The controller holds no
+access to Secrets, and an admission policy limits every Job in the namespace to the pinned
+bootstrap image, so a compromised controller cannot have a Job print a key
+([ADR-0008](../adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)).
+
+When a Secret has `knownHosts`, the bootstrap image always verifies the host key strictly,
+whatever the Host's `hostKeyPolicy` says. A key can then only be used against the hosts its own
+Secret pins.
 
 ## Secret keys
 

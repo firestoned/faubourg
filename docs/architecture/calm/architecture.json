@@ -35,7 +35,13 @@
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job (planned, roadmap 01)",
-      "description": "One Kubernetes Job per Host generation. Mounts only that host's SSH Secret(s) and the install script source. Places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006)."
+      "description": "One Kubernetes Job per Host generation, in the credentials namespace (ADR-0005 decision 5). Runs faubourg's digest-pinned bootstrap image, mounts only that host's SSH Secret(s) and an allowlisted install script source, places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006, ADR-0008)."
+    },
+    {
+      "unique-id": "service-bootstrap-admission-policy",
+      "node-type": "service",
+      "name": "Bootstrap admission policy",
+      "description": "A ValidatingAdmissionPolicy and binding on the credentials namespace, evaluated by the Kubernetes API server. Every Job there must run the digest-pinned bootstrap image with no command, literal env, read-only credential and allowlisted script volumes and the restricted security profile; only the Job controller may create Pods there. Parameters live in a ConfigMap in faubourg-system that neither the controller nor a script maintainer can write (ADR-0008)."
     },
     {
       "unique-id": "data-asset-host-az-crs",
@@ -77,7 +83,7 @@
       "unique-id": "data-asset-install-script",
       "node-type": "data-asset",
       "name": "Install script source",
-      "description": "ConfigMap or Secret holding install.sh. The default downloads a pinned banlieue binary, verifies its sha256 and runs banlieue host cloud-hypervisor install (ADR-0005)."
+      "description": "ConfigMap or Secret holding install.sh, in the credentials namespace and on the admission policy's scriptSources allowlist. The default downloads a pinned banlieue binary, verifies its sha256 and runs banlieue host cloud-hypervisor install (ADR-0005, ADR-0008)."
     },
     {
       "unique-id": "data-asset-host-install-script",
@@ -113,7 +119,7 @@
   "relationships": [
     {
       "unique-id": "rel-faubourg-composition",
-      "description": "faubourg is two reconcilers and the Jobs one of them creates, guarding the inventory objects.",
+      "description": "faubourg is two reconcilers, the Jobs one of them creates and the admission policy that constrains those Jobs, guarding the inventory objects.",
       "relationship-type": {
         "composed-of": {
           "container": "system-faubourg",
@@ -121,6 +127,7 @@
             "service-host-controller",
             "service-zone-controller",
             "service-bootstrap-job",
+            "service-bootstrap-admission-policy",
             "data-asset-host-az-crs"
           ]
         }
@@ -193,7 +200,7 @@
     },
     {
       "unique-id": "rel-host-controller-kube",
-      "description": "Watches Host, AvailabilityZone, Job and Provider; creates Jobs and Providers; reads Leases in banlieue's workload namespace. No Secret access in the credentials namespace.",
+      "description": "Watches Host, AvailabilityZone, Job, Pod and Provider; creates Jobs in the credentials namespace and Providers; reads Leases in banlieue's workload namespace. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -205,6 +212,20 @@
         }
       },
       "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-admission-policy-kube",
+      "description": "The API server evaluates the policy on every Job and Pod create or update in the credentials namespace, before the object exists. Deny on failure.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "ecosystem-kube-api"
+          },
+          "destination": {
+            "node": "service-bootstrap-admission-policy"
+          }
+        }
+      }
     },
     {
       "unique-id": "rel-zone-controller-kube",
@@ -223,7 +244,7 @@
     },
     {
       "unique-id": "rel-job-secret",
-      "description": "The Job's pod mounts exactly one host's Secret(s) as a volume; the controller never fetches them.",
+      "description": "The Job's pod mounts exactly one host's Secret(s) as a read-only volume; the controller never fetches them, and the admission policy keeps any other image from mounting them (ADR-0008).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -372,7 +393,7 @@
     "repository": "https://github.com/firestoned/faubourg",
     "license": "Apache-2.0",
     "calm-schema-version": "1.2",
-    "phase": "Architecture only. faubourg-api types exist; the controllers and the bootstrap Job are planned (roadmap 01)."
+    "phase": "faubourg-api types and the controller's pure functions (phase machine, Provider health, bootstrap Job builder) exist, with the bootstrap admission policy; the reconcilers and the bootstrap image are planned (roadmap 01)."
   },
   "adrs": [
     "docs/adr/0001-record-architecture-decisions.md",
@@ -381,6 +402,7 @@
     "docs/adr/0004-v1-local-storage-only.md",
     "docs/adr/0005-bootstrap-runs-one-scoped-install-script.md",
     "docs/adr/0006-ssh-credentials.md",
-    "docs/adr/0007-health-from-the-banlieue-provider.md"
+    "docs/adr/0007-health-from-the-banlieue-provider.md",
+    "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md"
   ]
 }

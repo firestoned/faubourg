@@ -50,13 +50,20 @@ optionally `CA_BUNDLE` for an internal CA, and `INSTALL_FLAGS` for the installer
 ## Publish the script
 
 The script source is a `ConfigMap` (or a `Secret`, if the script embeds something secret) in
-the controller's namespace. A Host points at it with `bootstrap.scriptRef`; with no
-`scriptRef`, the controller's configured default applies.
+the **credentials namespace**, where the bootstrap Job runs and its SSH Secrets live
+([ADR-0005](../adr/0005-bootstrap-runs-one-scoped-install-script.md)). A Host points at it with
+`bootstrap.scriptRef`; with no `scriptRef`, the controller's configured default applies.
 
 ```sh
-kubectl -n faubourg-system create configmap faubourg-install \
+kubectl -n faubourg-credentials create configmap faubourg-install \
   --from-file=install.sh=examples/host/install.sh --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+The admission policy only lets a Job mount a script source that is on its allowlist
+([ADR-0008](../adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)), so add it to the
+`scriptSources` key of the `faubourg-bootstrap-policy` ConfigMap in `faubourg-system`, for
+example `ConfigMap/faubourg-install`. That ConfigMap is a platform administrator's to edit,
+not the script maintainer's.
 
 !!! danger "Whoever can write the script source is root on every host"
 

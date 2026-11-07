@@ -5,11 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0007** (all Accepted). Second pass: the shipped code is
-> `crates/faubourg-api` (types, validation, the SSH Secret contract) and
-> `crates/faubourg-controller` (the Host phase machine and the reading of a `Provider`'s
-> health, as pure functions). No reconciler, Job or RBAC exists yet. Every control below that
-> lives in a planned component says so; nothing planned is written as though it exists.
+> defined by **ADR-0001 … ADR-0008** (all Accepted; ADR-0002 and ADR-0005 amended). Third
+> pass: the shipped code is `crates/faubourg-api` (types, validation, the SSH Secret
+> contract) and `crates/faubourg-controller` (the Host phase machine, `Provider` health and the
+> bootstrap Job builder, as pure functions), with the bootstrap admission policy and the
+> controller's RBAC in `deploy/`, both tested against a real API server (`make vap-test`).
+> No reconciler and no bootstrap image exist yet. Every control below that lives in a planned
+> component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
 
@@ -31,10 +33,13 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | `faubourg-api` types, validation, Secret contract | shipped | `crates/faubourg-api` |
 | CRDs | shipped | `deploy/crds/` (generated, drift-tested) |
 | Default install script and sudoers rule | shipped as examples | `examples/host/` |
-| Host phase machine and `Provider` health | shipped, pure functions, no cluster access | `crates/faubourg-controller` |
-| Host controller (reconciler, RBAC) | planned, roadmap 01 | |
+| Host phase machine and `Provider` health | shipped, pure functions, no cluster access | `crates/faubourg-controller/src/{phase,health}.rs` |
+| Bootstrap Job builder | shipped, pure function | `crates/faubourg-controller/src/job.rs` |
+| Bootstrap admission policy (ADR-0008) | shipped as manifests, tested on kind | `deploy/admission/`, `scripts/vap-test.sh` |
+| Controller and bootstrap identities, RBAC | shipped as manifests, tested on kind | `deploy/rbac/controller.yaml` |
+| Host controller (reconciler) | planned, roadmap 01 | |
+| Bootstrap image (SSH client) | planned, roadmap 01 | |
 | Zone controller | planned, roadmap 02 | |
-| Bootstrap Job | planned, roadmap 01 | |
 
 ## 3. Assets
 
@@ -47,12 +52,16 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-5 Host and AvailabilityZone CRs | Decide what gets bootstrapped and where VMs may land. |
 | A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003). |
 | A-7 Pinned banlieue binary digest | The script's only proof the binary is genuine. |
+| A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only objects that may be A-3. Root-equivalent across the fleet. |
 
 ## 4. Actors
 
 | Actor | Trust |
 | --- | --- |
-| Platform operator | Trusted. Writes CRs, Secrets and the script source. |
+| Platform administrator | Trusted. Writes the admission policy, its parameters (A-8), the RBAC and the Secrets. |
+| Platform operator | Trusted for inventory. Writes Host and AvailabilityZone CRs. |
+| Script maintainer | Trusted for A-3 only. Writes ConfigMaps in the credentials namespace; cannot change which image runs or which objects may be a script (A-8 lives elsewhere). |
+| The Host controller | Not trusted with credentials. A compromise must not yield a key (ADR-0008). |
 | VM consumer | Untrusted toward faubourg. Never reads or writes faubourg objects. |
 | Cluster workloads | Untrusted. Must not read the credentials namespace or the script source. |
 | Network attacker between cluster and hosts | Untrusted. |
@@ -68,6 +77,7 @@ flowchart LR
         ctl[Host / Zone controllers]
         job[Bootstrap Job]
     end
+    kube -.->|evaluates every Job and Pod in the credentials namespace| vap{{Bootstrap admission policy}}
     ctl -->|TB-1| kube
     job -->|TB-2 mounts| kube
     job -->|TB-3 SSH| host
@@ -91,7 +101,13 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Controller reads SSH Secrets and leaks them | I | Planned: controller RBAC has no Secret access in the credentials namespace (ADR-0006 consequence). Not yet built. |
+| Controller reads SSH Secrets and leaks them | I | The controller's RBAC has no verb on Secrets or ConfigMaps anywhere, and no Pod create or subresource (`deploy/rbac/controller.yaml`; `vap-test` checks each with `auth can-i`). |
+| Compromised controller creates a Job that prints a key (its own image, a command, `envFrom`, an extra volume, a mounted token, a host namespace) | I, E | ADR-0008: every Job in the credentials namespace must run the digest-pinned image from A-8 with no command or arguments, literal env, only the `credentials`, `placement` and `script` volumes read-only, the bootstrap ServiceAccount with no token, no host namespaces and the restricted profile (`deploy/admission/bootstrap-policy.yaml`, `faubourg-bootstrap-jobs`). Applies to cluster-admin too. Each rule has a refusing case in `scripts/vap-test.sh`. |
+| Compromised controller mounts another host's key as the "install script", so placement copies it to a host it chooses | I | The `script` volume must be on A-8's `scriptSources` allowlist (`vap-test`: "another host's key as the script"). |
+| A Secret reaches a pod by another route: a direct Pod, a Deployment, an ephemeral container, `kubectl set image` | I, E | `faubourg-bootstrap-pods`: only `system:serviceaccount:kube-system:job-controller` creates Pods there, for a Job it controls; Pod specs never change; no ephemeral containers (`vap-test`, including a real Job's pod). |
+| The policy parameters are changed to admit another image | T, E | A-8 lives in `faubourg-system`; the controller has no ConfigMap write anywhere, and a script maintainer's ConfigMap access is in the credentials namespace (`vap-test`: "change the policy parameters: no"). Missing parameters deny every Job (`parameterNotFoundAction: Deny`, tested). |
+| The policy fails open on an error | T | `failurePolicy: Fail` on both policies. Observed: a CEL error in an early draft denied every pod, the Job controller's included. |
+| The controller's own Job fails the policy, so bootstrap never works | D | The builder's real output is the first case `vap-test` submits (`examples/bootstrap-job.rs`); the builder's shape is also unit-tested rule by rule (`job.rs`). |
 | A Host CR smuggles a shell command into the bootstrap | T, E | The Host API carries no free-form argument: `bootstrap` is a method and a script reference only (`crates/faubourg-api/src/host.rs`, `BootstrapSpec`). Address, names and keys are validated fail closed (`HostSpec::validate`). |
 | An address is read as an SSH option (`-oProxyCommand=...`) | E | `is_address` accepts only an IP or a lowercase DNS name, which cannot begin with `-` (`host.rs`, tested by `addresses_that_could_be_ssh_options_or_shell_are_refused`). |
 | A zone's `providerLabels` overwrites faubourg's own label and moves hosts between zones | T | Keys under `faubourg.firestoned.io/` are refused (`zone.rs`, `REASON_RESERVED_LABEL`). |
@@ -104,7 +120,9 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Job for host A mounts host B's credential | I, E | Planned: the Job mounts only the Secrets its Host names. Not yet built. |
+| Job for host A mounts host B's credential | I, E | The builder mounts only the Secrets the Host names (`job.rs`, `it_mounts_only_its_hosts_secrets_and_the_script`). A compromised controller can still pair any key Secret with any address, but cannot read the key: the pinned image only uses it to authenticate, after verifying the host key (ADR-0008 decision 5, a requirement on the planned image). See R-5. |
+| A missing Secret starts the pod without a credential | D | Secret volumes are not `optional` (`job.rs`). |
+| The Job's environment carries a secret or a command line | I | Env holds only Host name, address, port, host key policy, the pinned fingerprint and the revoke flag, all literal (`job.rs`, `the_environment_is_literal_and_carries_only_connection_settings`, `the_job_names_secrets_but_holds_no_secret_material`). |
 | Credential printed to logs | I | `Sensitive` redacts `Debug` (`crates/faubourg-api/src/credentials.rs`, `debug_never_prints_secret_material`). The Job's logging is planned. |
 | Malformed username used as an option to ssh | E | `is_login_name` (`credentials.rs`). |
 | Ambiguous credential (key and password) | S | Refused, `CredentialError::Ambiguous`. |
@@ -114,7 +132,8 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Man in the middle on first connection | S, I | `hostKeyPolicy: Strict` is the default (`host.rs`, `defaults_are_the_safe_ones`); TOFU must be explicit and its fingerprint is pinned in status. Enforcement is in the planned Job. |
+| Man in the middle on first connection | S, I | `hostKeyPolicy: Strict` is the default (`host.rs`, `defaults_are_the_safe_ones`); TOFU must be explicit and its fingerprint is pinned in status and passed to the Job (`job.rs`, `a_pinned_tofu_fingerprint_is_passed_on`). Enforcement is in the planned bootstrap image, which must treat a Secret with `knownHosts` as `Strict` whatever the Job's env says (ADR-0008 decision 5). |
+| A retry loop hammers a host with a refused key, or re-runs after drift | D | `podFailurePolicy` fails the Job at once on exit 64 (`ScriptDrift`) and 65 (host key refused); other failures retry twice; one hour deadline (`job.rs`, `drift_and_a_refused_host_key_fail_the_job_without_retries`). |
 | Scoped account rewrites the script it may run as root | E | ADR-0005 decision 3: `/opt/faubourg` and the script are root-owned; sudoers allows only that path with no arguments (`examples/host/sudoers-faubourg`, `visudo -c` clean). Placement is in the planned Job. |
 | Script run with attacker arguments | E | Sudo rule forbids arguments (`""`); the script refuses any (`examples/host/install.sh`). |
 | Privileged placement key left on the host | E | `revokeAfterBootstrap` (ADR-0006 decision 4). Planned. |
@@ -136,8 +155,12 @@ flowchart LR
 - The example install script: no arguments, fixed `PATH`, digest-pinned download, HTTPS only.
 - Host health fails closed: only a current-generation `Ready=True` with an `Alive` heartbeat
   counts (`crates/faubourg-controller/src/health.rs`).
-- Supply chain: `banlieue-api` is a git dependency pinned by full commit rev (`Cargo.toml`),
-  and `cargo deny` refuses any other git source or registry (`deny.toml`, `[sources]`). CI
+- Bootstrap Jobs are admitted only in the bootstrap shape, and Pods in the credentials
+  namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
+  against a real API server (`make vap-test`).
+- The controller holds no access to Secrets or ConfigMaps (`deploy/rbac/controller.yaml`).
+- Supply chain: `banlieue-api` comes from crates.io, pinned exactly (`=0.4.14`, `Cargo.toml`),
+  and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`). CI
   (`.github/workflows/build.yaml`) verifies commit signatures and DCO sign-off, runs
   cargo-audit and cargo-deny, and refuses real infrastructure identifiers; every third-party
   action is SHA-pinned and the top-level token is `contents: read`. CodeQL (`codeql.yaml`),
@@ -147,10 +170,12 @@ flowchart LR
 
 | ID | Risk | Revisit when |
 | --- | --- | --- |
-| R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated only by RBAC on that ConfigMap or Secret. | The controller lands: decide whether the script source must be signed, or its digest pinned in controller config. |
+| R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | The reconciler lands: decide whether the script's digest is pinned in A-8 too. |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
 | R-3 | The controls marked planned above do not exist yet. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
+| R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
+| R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
 
@@ -158,11 +183,13 @@ flowchart LR
   model, not this one.
 - The hosts' OS, sshd configuration and patching are the operator's.
 - The network path from cluster nodes to host SSH (ADR-0005 open question).
-- Where the bootstrap Job runs. A pod can mount Secrets and ConfigMaps only from its own
-  namespace, but ADR-0005 puts the script source in the controller's namespace and ADR-0006
-  puts the SSH Secrets in the credentials namespace. This must be settled (an ADR-0005
-  amendment) before the Job builder is written. It decides which namespace holds A-1, A-2
-  and A-3 together, and so which RBAC protects them.
+- Kubernetes 1.30 or later (ValidatingAdmissionPolicy GA). `vap-test` runs on kind's current
+  release.
+- kube-controller-manager runs with `--use-service-account-credentials`, so Job pods are
+  created as `system:serviceaccount:kube-system:job-controller`. Without it the Pod rule
+  refuses every bootstrap pod (fails closed). Verify on each distribution, k0s included.
+- Re-bootstrap on a changed script source (ADR-0005 decision 8) needs the controller to see
+  that the source changed, and it has no ConfigMap access. To be designed with the reconciler.
 
 ## 10. Revision log
 
@@ -170,3 +197,4 @@ flowchart LR
 | --- | --- | --- |
 | 2026-11-07 | 0001 … 0007 | First pass, written with the architecture. Single install script and scoped sudo rule (ADR-0005). |
 | 2026-11-07 | 0001 … 0007 | Second pass: ADR-0003 … ADR-0007 accepted; the phase machine and `Provider` health shipped (TB-1 rows added); CI and supply-chain hardening recorded; the Job namespace question raised. R-1 … R-4 unchanged: no reconciler or Job exists yet, so R-3 stays open. |
+| 2026-11-07 | 0001 … 0008 | Third pass: ADR-0008 (admission policy) and the ADR-0002 and ADR-0005 amendments. The Job builder, the admission policy and the controller RBAC shipped and are tested on a real API server; TB-1 and TB-2 rows rewritten; A-8, R-5, R-6 and three actors added; the Job namespace question closed (credentials namespace). R-3 stays open: no reconciler or bootstrap image yet. |

@@ -12,3 +12,4 @@
 | [0005](0005-bootstrap-runs-one-scoped-install-script.md) | Bootstrap runs one install script under one scoped sudo rule | Accepted |
 | [0006](0006-ssh-credentials.md) | SSH credentials | Accepted |
 | [0007](0007-health-from-the-banlieue-provider.md) | Health from the banlieue Provider | Accepted |
+| [0008](0008-bootstrap-jobs-constrained-by-admission-policy.md) | Bootstrap Jobs are constrained by a ValidatingAdmissionPolicy | Accepted |

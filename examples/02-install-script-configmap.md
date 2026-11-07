@@ -4,11 +4,12 @@
 # Publishing the install script
 
 Edit the settings block of [`host/install.sh`](host/install.sh) (the internal repository
-URL, the pinned banlieue version and its sha256), then publish it where the controller
-reads it:
+URL, the pinned banlieue version and its sha256), then publish it in the credentials
+namespace, where the bootstrap Job runs (ADR-0005), and list it in the admission policy's
+`scriptSources` (ADR-0008, [`deploy/admission/`](../deploy/admission/)):
 
 ```sh
-kubectl -n faubourg-system create configmap faubourg-install \
+kubectl -n faubourg-credentials create configmap faubourg-install \
   --from-file=install.sh=examples/host/install.sh --dry-run=client -o yaml | kubectl apply -f -
 ```
 
