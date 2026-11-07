@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0009** (ADR-0001 … ADR-0008 Accepted, ADR-0009 Proposed;
-> ADR-0002, ADR-0005 and ADR-0007 amended). Fourth pass: the shipped code is
+> defined by **ADR-0001 … ADR-0009** (all Accepted; ADR-0002, ADR-0005 and ADR-0007
+> amended). Fourth pass: the shipped code is
 > `crates/faubourg-api` (types, validation, the SSH Secret contract) and
 > `crates/faubourg-controller`, now including the Host reconciler (`plan.rs` decides,
 > `controller.rs` carries it out) and the `faubourg-controller` binary, with the admission
@@ -229,4 +229,4 @@ flowchart LR
 | 2026-11-07 | 0001 … 0007 | First pass, written with the architecture. Single install script and scoped sudo rule (ADR-0005). |
 | 2026-11-07 | 0001 … 0007 | Second pass: ADR-0003 … ADR-0007 accepted; the phase machine and `Provider` health shipped (TB-1 rows added); CI and supply-chain hardening recorded; the Job namespace question raised. R-1 … R-4 unchanged: no reconciler or Job exists yet, so R-3 stays open. |
 | 2026-11-07 | 0001 … 0008 | Third pass: ADR-0008 (admission policy) and the ADR-0002 and ADR-0005 amendments. The Job builder, the admission policy and the controller RBAC shipped and are tested on a real API server; TB-1 and TB-2 rows rewritten; A-8, R-5, R-6 and three actors added; the Job namespace question closed (credentials namespace). R-3 stays open: no reconciler or bootstrap image yet. |
-| 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Proposed) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |
+| 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Accepted) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |
