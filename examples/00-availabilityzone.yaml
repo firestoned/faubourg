@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: faubourg.firestoned.io/v1alpha1
+kind: AvailabilityZone
+metadata:
+  name: az1
+spec:
+  description: Rack A, local NVMe
+  storage:
+    mode: Local
+  providerLabels:
+    topology.example.com/rack: a

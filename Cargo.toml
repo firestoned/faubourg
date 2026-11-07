@@ -1,0 +1,63 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "3"
+members = [
+  "crates/faubourg-api",
+  "crates/faubourg-controller",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+repository = "https://github.com/firestoned/faubourg"
+homepage = "https://github.com/firestoned/faubourg"
+authors = ["Erick Bourgeois"]
+publish = false
+
+[workspace.dependencies]
+# in-repo crates
+faubourg-api = { path = "crates/faubourg-api" }
+
+# banlieue's API, for the Provider type (ADR-0002 decision 4). Pinned by rev, not by branch:
+# a schema change in banlieue reaches faubourg only when this rev moves, and then fails to
+# compile instead of drifting at runtime. Move it in step with the kube pin below.
+banlieue-api = { git = "https://github.com/firestoned/banlieue", rev = "933f94d870d65c89c747c41f69c016b960bdadd0" }
+
+# kubernetes. Pinned to the same majors as banlieue-api (kube ~4.2, k8s-openapi 0.28), which
+# this project consumes for the Provider type (ADR-0002). Two kube majors in one graph break
+# kube::Resource across them, so banlieue moves first, then this pin.
+kube        = { version = "~4.2", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
+schemars    = "1"
+
+# serde + formats
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+# safe-Rust YAML (same choice as mediatore: serde_yaml_ng pulls unsafe-libyaml)
+serde-saphyr = "2.1"
+
+# errors, cli
+thiserror = "2"
+clap      = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

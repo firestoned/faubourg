@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# /etc/sudoers.d/faubourg, root:root 0440 (ADR-0005 decision 2). The scoped account may run
+# exactly one command, with no arguments (the trailing ""). /opt/faubourg and install.sh are
+# root:root 0755, so the account can run the script but never change it.
+Defaults:faubourg !requiretty, env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+faubourg ALL=(root) NOPASSWD: /opt/faubourg/install.sh ""

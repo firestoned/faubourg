@@ -1,0 +1,294 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build gate: license headers, signed commits, DCO, no real infrastructure,
+# fmt, clippy, tests, CRD drift, cargo-audit, cargo-deny, and one aggregate
+# required check.
+#
+# Mirrors banlieue's build.yaml at faubourg's current scale: there is no
+# controller binary or image yet (roadmap 01), so the binary, Docker, SBOM,
+# Cosign, SLSA and Grype/VEX jobs are deliberately not ported. They come with
+# the first shipped binary. All logic lives in Makefile targets
+# (.claude/rules/github-workflows.md); jobs only install tools and call make.
+#
+# NOTE: deliberately NO `paths:` filter on `pull_request`. A workflow-level
+# path filter cannot coexist with a required aggregator check: a workflow that
+# never triggers reports no contexts, so the required context stays pending
+# forever. The filter lives in `make ci-code-changed`, applied by the
+# `changes` job per job, so a docs-only PR skips the Rust work and still
+# reports.
+
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  # Reusable: dependabot-auto-merge.yaml gates on this whole workflow.
+  workflow_call:
+  workflow_dispatch:
+
+# Top-level GITHUB_TOKEN is read-only (OpenSSF Scorecard Token-Permissions).
+# No job here needs more.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Does this PR touch anything the Rust build cares about? The path list is
+  # `make ci-code-changed`. Non-PR events always report `true`.
+  # ─────────────────────────────────────────────────────────────────────────
+  changes:
+    name: 🔀 Detect Relevant Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect build-relevant changes
+        id: detect
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=$(make ci-code-changed)" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # License headers: every PR, docs-only ones included.
+  # ─────────────────────────────────────────────────────────────────────────
+  license-check:
+    name: ⚖️ Verify SPDX License Headers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check license headers
+        uses: firestoned/github-actions/security/license-check@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          copyright-holder: "Erick Bourgeois, faubourg"
+          license-id: "Apache-2.0"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Commit signatures: verify-mode differs by event type.
+  # ─────────────────────────────────────────────────────────────────────────
+  verify-commits:
+    name: 🔐 Verify Signed Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify commits (PR)
+        if: github.event_name == 'pull_request'
+        uses: firestoned/github-actions/security/verify-signed-commits@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          base-ref: origin/${{ github.base_ref }}
+          verify-mode: pr
+
+      - name: Verify commits (push to main)
+        if: github.event_name == 'push'
+        uses: firestoned/github-actions/security/verify-signed-commits@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          verify-mode: push
+
+      - name: Verify commits (release)
+        if: github.event_name == 'release'
+        uses: firestoned/github-actions/security/verify-signed-commits@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          verify-mode: release
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PR only: Developer Certificate of Origin (CONTRIBUTING.md). Never gated
+  # on changed paths: a sign-off matters on a prose PR too.
+  # ─────────────────────────────────────────────────────────────────────────
+  dco:
+    name: ✍️ DCO Sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Test the check
+        run: make dco-check-test
+
+      - name: Check every commit is signed off by its author
+        env:
+          DCO_RANGE: origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}
+        run: make dco-check
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PR only: no real infrastructure in a tracked file
+  # (.claude/rules/no-real-infrastructure.md). Generic patterns only; the
+  # maintainer's own host names live in a local denylist the repo never sees.
+  # ─────────────────────────────────────────────────────────────────────────
+  infra-identifiers:
+    name: 🕵️ No Real Infrastructure
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test the check
+        run: make check-infra-identifiers-test
+
+      - name: Check tracked files
+        run: make check-infra-identifiers
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Formatting + clippy.
+  # ─────────────────────────────────────────────────────────────────────────
+  format:
+    name: 🎨 Check Formatting
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, license-check, verify-commits]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (moving ref, re-pin quarterly)
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: make fmt-check
+
+  clippy:
+    name: 📎 Clippy
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, format]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (moving ref, re-pin quarterly)
+        with:
+          components: clippy
+
+      - name: Cache cargo dependencies
+        uses: firestoned/github-actions/rust/cache-cargo@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          # Pull requests restore main's cache but never save their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run clippy
+        run: make lint
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Tests, then the CRD drift gate (deploy/crds must match the Rust types).
+  # ─────────────────────────────────────────────────────────────────────────
+  test:
+    name: 🧪 Test
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, license-check, verify-commits]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (moving ref, re-pin quarterly)
+
+      - name: Cache cargo dependencies
+        uses: firestoned/github-actions/rust/cache-cargo@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: make test
+
+      - name: CRDs match the Rust types
+        run: make crds-check
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Security: cargo-audit, then cargo-deny (licenses, advisories, sources).
+  # ─────────────────────────────────────────────────────────────────────────
+  security:
+    name: 🛡️ Security Vulnerability Scan
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, verify-commits]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (moving ref, re-pin quarterly)
+
+      - name: Run security scan
+        uses: firestoned/github-actions/rust/security-scan@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          cargo-audit-version: "0.22.0"
+
+  cargo-deny:
+    name: 🧪 cargo-deny (License + Advisory + Sources)
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, verify-commits]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          log-level: warn
+          command: check
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # The one required check for branch protection. `skipped` is a pass (a
+  # docs-only PR skips the Rust jobs); anything else that is not `success`
+  # fails it.
+  # ─────────────────────────────────────────────────────────────────────────
+  required-checks:
+    name: ✅ Required Checks
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [license-check, verify-commits, dco, infra-identifiers, format, clippy, test, security, cargo-deny]
+    steps:
+      - name: Assert no required job failed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Dependency results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A required job reported '$result'"; exit 1 ;;
+            esac
+          done
+          echo "All required jobs passed or were legitimately skipped."

@@ -1,0 +1,37 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# The scoped run credential and, for the first run only, a privileged placement credential
+# (ADR-0005, ADR-0006). Both live in the controller's credentials namespace. Placeholders
+# only; create real Secrets with `kubectl create secret generic --from-file`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hv01-ssh
+  namespace: faubourg-credentials
+type: Opaque
+stringData:
+  username: faubourg
+  privateKey: "<scoped private key>"
+  knownHosts: "hv01.home.example ssh-ed25519 <host public key>"
+---
+apiVersion: faubourg.firestoned.io/v1alpha1
+kind: Host
+metadata:
+  name: hv01
+spec:
+  zoneRef: az1
+  address: hv01.home.example
+  ssh:
+    secretRef:
+      name: hv01-ssh
+    placementSecretRef:
+      name: hv01-ssh-placement
+    hostKeyPolicy: Strict
+    revokeAfterBootstrap: true
+  bootstrap:
+    method: Script
+    scriptRef:
+      kind: ConfigMap
+      name: faubourg-install
+      key: install.sh
