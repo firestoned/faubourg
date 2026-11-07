@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# A throwaway OpenSSH host for `make bootstrap-test` (ADR-0010 decision 10). Never deployed.
+# The build context holds the per-run public keys:
+#   run.pub        the scoped account `faubourg`, which gets no sudo rule from this image
+#   placement.pub  `admin`, with passwordless sudo, and root
+FROM docker.io/library/alpine:3.22@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63
+RUN apk add --no-cache openssh-server sudo \
+ && ssh-keygen -A \
+ && adduser -D -s /bin/sh faubourg && adduser -D -s /bin/sh admin \
+ && sed -i -e 's/^faubourg:!/faubourg:*/' -e 's/^admin:!/admin:*/' -e 's/^root:!/root:*/' /etc/shadow \
+ && echo 'admin ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/admin && chmod 0440 /etc/sudoers.d/admin \
+ && printf 'PasswordAuthentication no\nPermitRootLogin prohibit-password\n' > /etc/ssh/sshd_config.d/test.conf
+COPY run.pub /home/faubourg/.ssh/authorized_keys
+COPY placement.pub /home/admin/.ssh/authorized_keys
+COPY placement.pub /root/.ssh/authorized_keys
+RUN chown -R faubourg:faubourg /home/faubourg/.ssh && chown -R admin:admin /home/admin/.ssh \
+ && chmod 0700 /home/faubourg/.ssh /home/admin/.ssh /root/.ssh \
+ && chmod 0600 /home/faubourg/.ssh/authorized_keys /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# The bootstrap image (ADR-0010): one static binary, nothing else. No shell, no package
+# manager, no ssh client. Build from the repository root:
+#
+#   podman build -f images/bootstrap/Containerfile -t faubourg-bootstrap .
+#
+# Base images are pinned by digest; Dependabot moves them.
+
+FROM docker.io/library/rust:1-alpine@sha256:2c83bf1a38975801abfd05e92387242ab4d5f96fe05131e2a279f3009ad16393 AS build
+# Use the image's toolchain, not rust-toolchain.toml's channel, so the build downloads nothing.
+ENV RUSTUP_TOOLCHAIN=1.99.1 CARGO_TERM_COLOR=never
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p faubourg-bootstrap --bin faubourg-bootstrap \
+ && install -m 0555 target/release/faubourg-bootstrap /faubourg-bootstrap
+
+FROM scratch
+COPY --from=build /faubourg-bootstrap /faubourg-bootstrap
+USER 65532:65532
+ENTRYPOINT ["/faubourg-bootstrap"]

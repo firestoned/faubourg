@@ -34,13 +34,20 @@ Secret pins.
 | Key | Required | Notes |
 | --- | --- | --- |
 | `username` | yes | A plain login name: lowercase, digits, `_` and `-`, at most 32, not starting with `-`. |
-| `privateKey` | one of these two | An OpenSSH private key. Preferred. |
+| `privateKey` | one of these two | An OpenSSH private key, Ed25519 or ECDSA. Preferred. RSA keys are refused ([ADR-0010](../adr/0010-bootstrap-image.md) decision 2). |
 | `password` | one of these two | Supported, discouraged. The Host gets a `WeakCredential` condition. |
 | `passphrase` | no | For an encrypted `privateKey`. Refused with `password`. |
 | `certificate` | no | An SSH certificate for `privateKey`, from an SSH CA. Preferred over a bare key. Refused with `password`. |
-| `knownHosts` | recommended | `known_hosts` lines pinning the host key. Required under `Strict`. |
+| `knownHosts` | recommended | `known_hosts` lines pinning the host key. Required under `Strict`. Name the host plainly: `<address>` on port 22, `[<address>]:<port>` otherwise. Hashed and wildcard patterns are not read. |
 
 Setting both `privateKey` and `password` is refused: the choice must be explicit.
+
+Generate the key and pin the host's Ed25519 or ECDSA key (without `-H`, which hashes the name):
+
+```sh
+ssh-keygen -t ed25519 -N "" -C "" -f ./hv01_ed25519
+ssh-keyscan -t ed25519 hv01.home.example > ./hv01_known_hosts
+```
 
 ```sh
 kubectl -n faubourg-credentials create secret generic hv01-ssh \
@@ -58,8 +65,14 @@ kubectl -n faubourg-credentials create secret generic hv01-ssh \
 
 `TrustOnFirstUse`
 :   Must be set explicitly. The first key seen is accepted, its fingerprint is recorded in the
-    Host's `status.acceptedHostKey`, and every later run is pinned to it. The first connection
-    is open to interception, so prefer `Strict` on any network you do not control.
+    Host's `status.acceptedHostKey` once that Job succeeds, and every later run is pinned to
+    it. The first connection is open to interception, so prefer `Strict` on any network you
+    do not control.
+
+A Secret with `knownHosts` is always checked strictly, whatever the policy says. The key is
+checked before anything is authenticated, and every connection of one run, placement and run
+alike, must see the same key. A refused key fails the Job at once, with reason
+`HostKeyRefused`. RSA host keys and host certificates are refused.
 
 ## Revoking the placement key
 

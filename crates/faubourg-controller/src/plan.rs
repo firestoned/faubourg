@@ -15,7 +15,7 @@
 //!   (decision 7).
 
 use banlieue_api::banlieue::Provider;
-use faubourg_api::host::{Host, HostPhase, HostStatus, REASON_INVALID_NAME};
+use faubourg_api::host::{Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME};
 use faubourg_api::zone::AvailabilityZone;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -24,6 +24,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use crate::health::ProviderHealth;
 use crate::job::{
     BootstrapConfig, JobError, bootstrap_job, job_generation, job_inputs, job_state, owned_by,
+    reported_host_key,
 };
 use crate::phase::{Decision, JobState, Observed, ZoneState, decide};
 
@@ -93,6 +94,21 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         .filter(|j| want.is_some() && job_inputs(j) == want)
         .max_by_key(|j| job_generation(j));
     let job = current.map_or(JobState::Absent, |j| job_state(j, w.pods));
+    // A first-use key is pinned from the Host's own succeeded Job (ADR-0010 decision 8).
+    let first_use = host
+        .spec
+        .ssh
+        .as_ref()
+        .is_some_and(|s| s.host_key_policy == HostKeyPolicy::TrustOnFirstUse);
+    let pinned = host
+        .status
+        .as_ref()
+        .and_then(|s| s.accepted_host_key.clone());
+    let accepted_host_key = match (pinned, current) {
+        (Some(fp), _) => Some(fp),
+        (None, Some(j)) if first_use && job == JobState::Succeeded => reported_host_key(j, w.pods),
+        (None, _) => None,
+    };
     let zone = zone_state(w.zone);
     let provider = ProviderHealth::of_labelled(w.providers);
     let previous = host.status.as_ref().and_then(|s| s.phase);
@@ -137,6 +153,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         &decision,
         generation,
         provider_ref,
+        accepted_host_key,
         w.now,
     );
     let status_changed = host.status.as_ref() != Some(&status);
@@ -182,6 +199,7 @@ fn status(
     d: &Decision,
     generation: i64,
     provider_ref: Option<String>,
+    accepted_host_key: Option<String>,
     now: &Time,
 ) -> HostStatus {
     let ready = if d.phase == HostPhase::Ready {
@@ -200,7 +218,7 @@ fn status(
     HostStatus {
         phase: Some(d.phase),
         provider_ref,
-        accepted_host_key: previous.and_then(|s| s.accepted_host_key.clone()),
+        accepted_host_key,
         conditions: vec![Condition {
             type_: CONDITION_READY.into(),
             status: ready.into(),
@@ -644,5 +662,88 @@ mod tests {
             now: &f.now,
         });
         assert_eq!(r, Err(NotPersisted("uid")));
+    }
+
+    // ----- first-use host keys (ADR-0010 decision 8) --------------------------------------
+
+    const FP: &str = "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s";
+
+    fn reported(job_uid: &str, message: &str) -> Pod {
+        serde_json::from_value(json!({
+            "metadata": { "name": "bootstrap-hv01-g1-x", "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": "bootstrap-hv01-g1",
+                "uid": job_uid, "controller": true }] },
+            "status": { "containerStatuses": [{
+                "name": "bootstrap", "image": "x", "imageID": "", "ready": false,
+                "restartCount": 0,
+                "state": { "terminated": { "exitCode": 0, "message": message } } }] }
+        }))
+        .unwrap()
+    }
+
+    fn first_use() -> Host {
+        let mut h = host(1);
+        h.spec.ssh.as_mut().unwrap().host_key_policy = HostKeyPolicy::TrustOnFirstUse;
+        h
+    }
+
+    #[test]
+    fn a_first_use_key_is_pinned_from_a_succeeded_job() {
+        let mut f = Fixture::new(first_use());
+        f.jobs = vec![job_for(&f.host, "j1", &["Complete"])];
+        f.pods = vec![reported("j1", &format!("{{\"hostKey\":\"{FP}\"}}"))];
+        let p = f.plan();
+        assert_eq!(p.status.accepted_host_key.as_deref(), Some(FP));
+        assert_eq!(p.create, None, "pinning the key re-runs nothing");
+    }
+
+    #[test]
+    fn a_pinned_key_is_never_replaced() {
+        let mut f = Fixture::new(first_use());
+        f.host.status = Some(HostStatus {
+            accepted_host_key: Some("SHA256:w/MKP5qmOhlfmXHftrq9Q2lgVxsxOdNJo9vPBW8Li+E".into()),
+            ..HostStatus::default()
+        });
+        f.jobs = vec![job_for(&f.host, "j1", &["Complete"])];
+        f.pods = vec![reported("j1", &format!("{{\"hostKey\":\"{FP}\"}}"))];
+        assert_eq!(
+            f.plan().status.accepted_host_key.as_deref(),
+            Some("SHA256:w/MKP5qmOhlfmXHftrq9Q2lgVxsxOdNJo9vPBW8Li+E")
+        );
+    }
+
+    #[test]
+    fn no_key_is_pinned_from_a_failed_job_a_strict_host_or_another_jobs_pod() {
+        let msg = format!("{{\"hostKey\":\"{FP}\"}}");
+        let mut f = Fixture::new(first_use());
+        f.jobs = vec![job_for(&f.host, "j1", &["Failed"])];
+        f.pods = vec![reported("j1", &msg)];
+        assert_eq!(f.plan().status.accepted_host_key, None, "failed");
+
+        let mut f = Fixture::new(host(1));
+        f.jobs = vec![job_for(&f.host, "j1", &["Complete"])];
+        f.pods = vec![reported("j1", &msg)];
+        assert_eq!(f.plan().status.accepted_host_key, None, "strict");
+
+        let mut f = Fixture::new(first_use());
+        f.jobs = vec![job_for(&f.host, "j1", &["Complete"])];
+        f.pods = vec![reported("other", &msg)];
+        assert_eq!(f.plan().status.accepted_host_key, None, "another job's pod");
+    }
+
+    #[test]
+    fn a_malformed_report_pins_nothing() {
+        for msg in [
+            "",
+            "not json",
+            "{\"hostKey\":\"MD5:aa\"}",
+            "{\"hostKey\":\"SHA256:short\"}",
+            "{}",
+        ] {
+            let mut f = Fixture::new(first_use());
+            f.jobs = vec![job_for(&f.host, "j1", &["Complete"])];
+            f.pods = vec![reported("j1", msg)];
+            assert_eq!(f.plan().status.accepted_host_key, None, "{msg:?}");
+        }
     }
 }

@@ -14,8 +14,8 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] `make vap-test` and `make controller-test` in CI (the `kind` job in `build.yaml`)
 - [x] Refuse Host names longer than 63 in the CRD (a CEL rule, ADR-0009 decision 10)
 - [ ] Re-bootstrap on changed script *content* under the same source name, without giving the controller ConfigMap access (ADR-0009 decision 6)
-- [ ] Bootstrap image: ssh client, host key verified before authenticating and always `Strict` when the Secret has `knownHosts` (ADR-0008 decision 5), sha256 compare of the on-host script, placement, `sudo -n /opt/faubourg/install.sh`, exit 64 `ScriptDrift` and 65 host key refused
-- [ ] Strict host keys, TOFU fingerprint pinned in status, `revokeAfterBootstrap`
+- [x] ADR-0010 and the bootstrap image (`crates/faubourg-bootstrap`, `images/bootstrap/`): russh, no shell in the image; host key verified before authenticating and always `Strict` when the Secret has `knownHosts`; owner, mode and sha256 check of the on-host script; placement and `visudo`-checked sudo rule; `sudo -n /opt/faubourg/install.sh`; exit 64 `ScriptDrift` and 65 `HostKeyRefused`; tested against a real sshd (`make bootstrap-test`)
+- [x] TOFU fingerprint reported by the Job and pinned in status by the controller; `revokeAfterBootstrap`
 - [ ] Create and label the host's banlieue `Provider` (field manager `faubourg.firestoned.io/host-controller`)
 - [ ] Controller image: build, sign and publish `faubourg-controller`, and pin it in `deploy/controller/deployment.yaml`
 - [ ] Leader election, before more than one replica

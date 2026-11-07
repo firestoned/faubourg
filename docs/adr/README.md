@@ -14,3 +14,4 @@
 | [0007](0007-health-from-the-banlieue-provider.md) | Health from the banlieue Provider | Accepted |
 | [0008](0008-bootstrap-jobs-constrained-by-admission-policy.md) | Bootstrap Jobs are constrained by a ValidatingAdmissionPolicy | Accepted |
 | [0009](0009-host-reconciler.md) | The Host reconciler | Accepted |
+| [0010](0010-bootstrap-image.md) | The bootstrap image | Proposed |

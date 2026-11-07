@@ -36,40 +36,15 @@ use sha2::{Digest, Sha256};
 
 use crate::phase::{JobFailure, JobState};
 
-/// Name of the one container.
-pub const CONTAINER: &str = "bootstrap";
-/// Volume holding the scoped run credential.
-pub const VOLUME_CREDENTIALS: &str = "credentials";
-/// Volume holding the optional placement credential.
-pub const VOLUME_PLACEMENT: &str = "placement";
-/// Volume holding the install script.
-pub const VOLUME_SCRIPT: &str = "script";
-/// Where the run credential is mounted.
-pub const MOUNT_CREDENTIALS: &str = "/var/run/faubourg/credentials";
-/// Where the placement credential is mounted.
-pub const MOUNT_PLACEMENT: &str = "/var/run/faubourg/placement";
-/// Where the install script is mounted; the file inside is always `install.sh`.
-pub const MOUNT_SCRIPT: &str = "/var/run/faubourg/script";
-
-/// Env: the Host's name, for logs.
-pub const ENV_HOST: &str = "FAUBOURG_HOST";
-/// Env: the address to reach over SSH.
-pub const ENV_ADDRESS: &str = "FAUBOURG_ADDRESS";
-/// Env: the SSH port.
-pub const ENV_PORT: &str = "FAUBOURG_PORT";
-/// Env: `Strict` or `TrustOnFirstUse`. A Secret with `knownHosts` is always strict
-/// (ADR-0008 decision 5).
-pub const ENV_HOST_KEY_POLICY: &str = "FAUBOURG_HOST_KEY_POLICY";
-/// Env: the fingerprint pinned by an earlier `TrustOnFirstUse` run, when there is one.
-pub const ENV_ACCEPTED_HOST_KEY: &str = "FAUBOURG_ACCEPTED_HOST_KEY";
-/// Env: `true` to remove the placement key from the host once placement succeeds.
-pub const ENV_REVOKE_PLACEMENT: &str = "FAUBOURG_REVOKE_PLACEMENT";
-
-/// Exit code: the on-host script differs from the source and there is no placement
-/// credential (ADR-0005 decision 4). Fails the Job at once, without retries.
-pub const EXIT_SCRIPT_DRIFT: i32 = 64;
-/// Exit code: the host key was refused. Fails the Job at once: a retry cannot fix it.
-pub const EXIT_HOST_KEY_REFUSED: i32 = 65;
+// The contract with the bootstrap image lives in faubourg-api, so the builder and the image
+// cannot disagree on it (ADR-0010).
+pub use faubourg_api::bootstrap::{
+    CONTAINER, ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT,
+    ENV_REVOKE_PLACEMENT, EXIT_HOST_KEY_REFUSED, EXIT_SCRIPT_DRIFT, MOUNT_CREDENTIALS,
+    MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, VOLUME_CREDENTIALS, VOLUME_PLACEMENT,
+    VOLUME_SCRIPT,
+};
+use faubourg_api::bootstrap::{Report, is_fingerprint};
 
 /// Label: what manages the Job.
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -351,19 +326,36 @@ pub fn job_state(job: &Job, pods: &[Pod]) -> JobState {
     JobState::Running
 }
 
+/// The host key fingerprint a Job's bootstrap container reported in its termination message
+/// (ADR-0010 decision 7), read only from pods the Job controls. Anything but a well-formed
+/// fingerprint is ignored, so a pod cannot pin junk into a Host.
+pub fn reported_host_key(job: &Job, pods: &[Pod]) -> Option<String> {
+    let uid = job.metadata.uid.as_deref()?;
+    pods.iter()
+        .filter(|p| controlled_by(p, uid))
+        .filter_map(|p| p.status.as_ref()?.container_statuses.as_ref())
+        .flatten()
+        .filter(|c| c.name == CONTAINER)
+        .filter_map(|c| c.state.as_ref()?.terminated.as_ref()?.message.as_deref())
+        .filter_map(|m| serde_json::from_str::<Report>(m).ok()?.host_key)
+        .find(|fp| is_fingerprint(fp))
+}
+
+fn controlled_by(p: &Pod, job_uid: &str) -> bool {
+    p.metadata
+        .owner_references
+        .iter()
+        .flatten()
+        .any(|r| r.controller == Some(true) && r.kind == "Job" && r.uid == job_uid)
+}
+
 fn failure(job: &Job, pods: &[Pod]) -> JobFailure {
     let Some(uid) = job.metadata.uid.as_deref() else {
         return JobFailure::Other;
     };
     let codes: Vec<i32> = pods
         .iter()
-        .filter(|p| {
-            p.metadata
-                .owner_references
-                .iter()
-                .flatten()
-                .any(|r| r.controller == Some(true) && r.kind == "Job" && r.uid == uid)
-        })
+        .filter(|p| controlled_by(p, uid))
         .filter_map(|p| p.status.as_ref()?.container_statuses.as_ref())
         .flatten()
         .filter(|c| c.name == CONTAINER)
@@ -522,7 +514,7 @@ fn secret_volume(volume: &str, secret: &str) -> Volume {
 fn script_volume(r: &ScriptRef) -> Volume {
     let items = Some(vec![KeyToPath {
         key: r.key.clone(),
-        path: "install.sh".into(),
+        path: SCRIPT_FILE.into(),
         ..KeyToPath::default()
     }]);
     let mut v = Volume {
