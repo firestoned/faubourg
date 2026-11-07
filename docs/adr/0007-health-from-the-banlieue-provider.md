@@ -28,3 +28,7 @@ banlieue's operator records `status.workload.heartbeat` as `Alive`, `Stale` or `
 - One health signal for banlieue and faubourg, so they cannot disagree.
 - faubourg needs `get` and `watch` on `Provider` and `get` on Leases in banlieue's
   workload namespace.
+
+*Amended 2026-11-07 by ADR-0009 (decision 12):* banlieue's operator writes the heartbeat into
+the Provider's status, so faubourg reads Providers only (`get`, `list`, `watch`) and needs
+nothing on Leases.

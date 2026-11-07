@@ -60,10 +60,12 @@ stateDiagram-v2
     Bootstrapping --> Failed: Job failed, or ScriptDrift
     Ready --> Degraded: Provider not Ready, or heartbeat not Alive
     Degraded --> Ready: Provider recovers
-    Failed --> Pending: new spec generation
+    Pending --> Pending: zone missing or unsupported
+    Failed --> Pending: changed bootstrap inputs, or the Job deleted
 ```
 
-- **Pending:** accepted, nothing started.
+- **Pending:** accepted, nothing started. No Job is created while the Host's zone is missing
+  or unsupported.
 - **Bootstrapping:** the per-host Job is running.
 - **Ready:** the Job succeeded *and* the host's `Provider` is `Ready=True` with a heartbeat of
   `Alive`. Success is the provider coming up, not an exit code.

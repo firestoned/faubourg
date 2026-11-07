@@ -8,7 +8,7 @@
 use std::net::IpAddr;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
-use kube::CustomResource;
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -33,13 +33,18 @@ pub const DEFAULT_SCRIPT_KEY: &str = "install.sh";
 pub const HOST_SCRIPT_PATH: &str = "/opt/faubourg/install.sh";
 
 /// Desired state of a host.
-#[derive(CustomResource, Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// A Host name is a label value on its bootstrap Job, its pods and its `Provider`, so the CRD
+/// refuses one longer than 63 characters (ADR-0009 decision 10).
+#[derive(CustomResource, Clone, Debug, Default, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[kube(
     group = "faubourg.firestoned.io",
     version = "v1alpha1",
     kind = "Host",
     plural = "hosts",
     status = "HostStatus",
+    validation = Rule::new("self.metadata.name.size() <= 63")
+        .message("a Host name is at most 63 characters: it is a label value"),
     printcolumn = r#"{"name":"Zone","type":"string","jsonPath":".spec.zoneRef"}"#,
     printcolumn = r#"{"name":"Address","type":"string","jsonPath":".spec.address"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,

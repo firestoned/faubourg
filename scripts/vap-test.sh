@@ -40,6 +40,11 @@ echo "vap-test: creating kind cluster $CLUSTER"
 kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
 kubectl version -o json | jq -r '"vap-test: server " + .serverVersion.gitVersion'
 
+# The controller reads Providers in banlieue's namespace, which banlieue would create, with
+# its Provider CRD (printed from the pinned banlieue-api).
+kubectl create namespace banlieue-system >/dev/null
+(cd "$ROOT" && cargo run -q -p faubourg-controller --example provider-crd) | kubectl apply -f - >/dev/null 2>&1
+kubectl wait --for=condition=Established crd/providers.banlieue.io --timeout=60s >/dev/null
 kubectl apply -f "$ROOT/deploy/rbac/controller.yaml" >/dev/null
 jq_image() { jq -c --arg img "$IMAGE" '.data.image = $img'; }
 kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-policy-params.yaml" \
@@ -178,6 +183,9 @@ expect_can no "read the script ConfigMap" get configmaps -n "$CREDS"
 expect_can no "change the policy parameters" update configmaps/faubourg-bootstrap-policy -n faubourg-system
 expect_can no "change the policy" patch validatingadmissionpolicies.admissionregistration.k8s.io
 expect_can no "change the binding" delete validatingadmissionpolicybindings.admissionregistration.k8s.io
+expect_can yes "watch Providers in banlieue's namespace" watch providers.banlieue.io -n banlieue-system
+expect_can no "change a Provider" patch providers.banlieue.io -n banlieue-system
+expect_can no "read a Secret in banlieue's namespace" get secrets -n banlieue-system
 
 echo "--- a real Job and its pod"
 if out="$(kubectl create -f - "${AS[@]}" <<<"$GOOD" 2>&1)"; then

@@ -89,3 +89,7 @@ need. Keeping a compromised controller from the keys takes an admission policy o
 the credentials namespace, and decision 5 says where the Job runs and no longer claims that a
 Job by itself keeps the credentials from the controller. Both followed from the first Job
 design: as accepted, a pod could not have mounted both its Secret and its script.
+
+*Amended 2026-11-07 by ADR-0009 (decision 6):* re-bootstrap follows a change to the Host's
+bootstrap inputs (`address`, `ssh`, the resolved script source), not every new generation, so
+cordoning a host or moving it to another zone runs nothing on it.

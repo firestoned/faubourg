@@ -13,6 +13,13 @@ allow = [
   "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "MPL-2.0",
 ]
 confidence-threshold = 0.9
+# Allowed for one crate only, so it cannot spread to the rest of the tree unnoticed.
+# webpki-root-certs is the Mozilla CA root bundle as X.509 data, under a permissive data
+# license (https://cdla.dev/permissive-2-0/), pulled by kube-client's rustls-tls through
+# rustls-platform-verifier. banlieue and mediatore allow it for the same crate.
+exceptions = [
+  { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

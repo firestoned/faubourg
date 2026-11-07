@@ -33,7 +33,11 @@ spec:
         description: Auto-generated derived type for HostSpec via `CustomResource`
         properties:
           spec:
-            description: Desired state of a host.
+            description: |-
+              Desired state of a host.
+
+              A Host name is a label value on its bootstrap Job, its pods and its `Provider`, so the CRD
+              refuses one longer than 63 characters (ADR-0009 decision 10).
             properties:
               address:
                 description: IP address or DNS name the bootstrap Job reaches over SSH.
@@ -215,6 +219,9 @@ spec:
         - spec
         title: Host
         type: object
+        x-kubernetes-validations:
+        - message: "a Host name is at most 63 characters: it is a label value"
+          rule: self.metadata.name.size() <= 63
     served: true
     storage: true
     subresources:

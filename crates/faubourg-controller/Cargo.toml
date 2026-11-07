@@ -3,7 +3,7 @@
 
 [package]
 name = "faubourg-controller"
-description = "faubourg's controllers: the Host phase machine (ADR-0007) and, next, the bootstrap Job (ADR-0005)"
+description = "faubourg's controllers: the Host reconciler (ADR-0009), its phase machine (ADR-0007) and bootstrap Job (ADR-0005, ADR-0008)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,26 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "faubourg-controller"
+path = "src/main.rs"
+
 [dependencies]
-faubourg-api = { workspace = true }
-banlieue-api = { workspace = true }
-k8s-openapi  = { workspace = true }
+faubourg-api       = { workspace = true }
+banlieue-api       = { workspace = true }
+k8s-openapi        = { workspace = true }
+kube               = { workspace = true, features = ["client", "runtime", "rustls-tls", "ring"] }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+sha2               = { workspace = true }
+thiserror          = { workspace = true }
+clap               = { workspace = true }
+tokio              = { workspace = true }
+futures            = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-serde_json = { workspace = true }

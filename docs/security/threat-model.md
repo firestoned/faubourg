@@ -5,12 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0008** (all Accepted; ADR-0002 and ADR-0005 amended). Third
-> pass: the shipped code is `crates/faubourg-api` (types, validation, the SSH Secret
-> contract) and `crates/faubourg-controller` (the Host phase machine, `Provider` health and the
-> bootstrap Job builder, as pure functions), with the bootstrap admission policy and the
-> controller's RBAC in `deploy/`, both tested against a real API server (`make vap-test`).
-> No reconciler and no bootstrap image exist yet. Every control below that lives in a planned
+> defined by **ADR-0001 … ADR-0009** (all Accepted; ADR-0002, ADR-0005 and ADR-0007
+> amended). Fourth pass: the shipped code is
+> `crates/faubourg-api` (types, validation, the SSH Secret contract) and
+> `crates/faubourg-controller`, now including the Host reconciler (`plan.rs` decides,
+> `controller.rs` carries it out) and the `faubourg-controller` binary, with the admission
+> policy, the RBAC and the controller Deployment in `deploy/`. The policy (`make vap-test`)
+> and the controller running with its own RBAC (`make controller-test`) are tested against a
+> real API server, in CI. No bootstrap image and no published controller image exist yet, and
+> faubourg does not create Providers yet. Every control below that lives in a planned
 > component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
@@ -37,7 +40,8 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Bootstrap Job builder | shipped, pure function | `crates/faubourg-controller/src/job.rs` |
 | Bootstrap admission policy (ADR-0008) | shipped as manifests, tested on kind | `deploy/admission/`, `scripts/vap-test.sh` |
 | Controller and bootstrap identities, RBAC | shipped as manifests, tested on kind | `deploy/rbac/controller.yaml` |
-| Host controller (reconciler) | planned, roadmap 01 | |
+| Host controller (reconciler, binary) | shipped, tested on kind with its own RBAC; image not published | `crates/faubourg-controller/src/{plan,controller,config,main}.rs`, `deploy/controller/`, `scripts/controller-test.sh` |
+| Creating and labelling Providers | planned, roadmap 01 | |
 | Bootstrap image (SSH client) | planned, roadmap 01 | |
 | Zone controller | planned, roadmap 02 | |
 
@@ -50,9 +54,10 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-3 Install script source (ConfigMap or Secret) | Runs as root on every host whose copy is updated. Root-equivalent across the fleet. |
 | A-4 `/opt/faubourg/install.sh` on the host | Root runs it under the sudo rule. |
 | A-5 Host and AvailabilityZone CRs | Decide what gets bootstrapped and where VMs may land. |
-| A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003). |
+| A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003), and `faubourg.firestoned.io/host` decides which Provider's health is the host's (ADR-0009 decision 5). |
 | A-7 Pinned banlieue binary digest | The script's only proof the binary is genuine. |
 | A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only objects that may be A-3. Root-equivalent across the fleet. |
+| A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace and writes Host status. Cannot read a credential (ADR-0008), but can run the pinned image with any of them (R-5). |
 
 ## 4. Actors
 
@@ -62,6 +67,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Platform operator | Trusted for inventory. Writes Host and AvailabilityZone CRs. |
 | Script maintainer | Trusted for A-3 only. Writes ConfigMaps in the credentials namespace; cannot change which image runs or which objects may be a script (A-8 lives elsewhere). |
 | The Host controller | Not trusted with credentials. A compromise must not yield a key (ADR-0008). |
+| banlieue administrator | Trusted by banlieue. Writes Providers and their labels in banlieue's namespace, so can attach a Provider to a Host by label (R-7). |
 | VM consumer | Untrusted toward faubourg. Never reads or writes faubourg objects. |
 | Cluster workloads | Untrusted. Must not read the credentials namespace or the script source. |
 | Network attacker between cluster and hosts | Untrusted. |
@@ -78,7 +84,7 @@ flowchart LR
         job[Bootstrap Job]
     end
     kube -.->|evaluates every Job and Pod in the credentials namespace| vap{{Bootstrap admission policy}}
-    ctl -->|TB-1| kube
+    ctl -->|TB-1: Hosts, zones, its Jobs, Providers, status| kube
     job -->|TB-2 mounts| kube
     job -->|TB-3 SSH| host
     subgraph host [Cloud Hypervisor host]
@@ -89,7 +95,8 @@ flowchart LR
     prov -->|TB-5 outbound| kube
 ```
 
-- **TB-1** controllers → Kubernetes API.
+- **TB-1** controllers → Kubernetes API: Hosts, zones, the Jobs and pods in the credentials
+  namespace, and Providers in banlieue's namespace.
 - **TB-2** Job pod → its mounted Secret(s) and script source.
 - **TB-3** Job → host sshd (placement and run).
 - **TB-4** install script → artifact repository (curl).
@@ -113,8 +120,21 @@ flowchart LR
 | A zone's `providerLabels` overwrites faubourg's own label and moves hosts between zones | T | Keys under `faubourg.firestoned.io/` are refused (`zone.rs`, `REASON_RESERVED_LABEL`). |
 | An unsupported storage mode is silently treated as Local | T | `Shared` is refused (`zone.rs`, `shared_storage_is_refused_in_v1`). |
 | A Host is reported `Ready` (and its zone counted ready) when its provider is not running | S, T | The phase machine reaches `Ready` only from `ProviderHealth::Healthy` (`crates/faubourg-controller/src/phase.rs`, `nothing_reaches_ready_without_a_healthy_provider`). Healthy needs `Ready=True` for the `Provider`'s current generation **and** an `Alive` heartbeat; a missing, `Unknown`, stale-generation or not-yet-evaluated signal is unhealthy (`health.rs`). A refused spec is `Failed` whatever the cluster says (`a_refused_spec_fails_whatever_the_cluster_says`). |
+| A Job someone else made, with the Host's labels, is taken as the Host's (a forged `Complete` record, or a squatter) | S, T | Only a Job whose controller `ownerReference` carries the Host's UID counts (`job.rs`, `owned_by`, `only_the_hosts_own_jobs_are_its_jobs`); a recreated Host does not inherit the old one's Jobs (`plan.rs`, `a_job_of_a_recreated_host_is_not_its_own`). |
+| The controller deletes a Job it does not own | T, D | Only owned Jobs are ever deleted (`plan.rs`, `a_job_the_host_does_not_own_is_ignored_and_never_deleted`). |
+| A Job squats the name of a Host's next Job, so bootstrap never starts | D | The create fails with `AlreadyExists`, which the controller logs and retries (`controller.rs`, `JobNameTaken`); it never adopts that Job. Creating a Job there already needs a role trusted with the namespace. |
+| Cordoning a host, moving it to another zone, or upgrading the controller re-runs root's install on it | T | A new Job only when the bootstrap inputs change: `address`, `ssh` and the resolved script source, hashed into the Job's annotation; `zoneRef`, `cordoned` and the image are not inputs (`job.rs`, `cordon_zone_and_image_are_not_bootstrap_inputs`, `the_inputs_encoding_is_pinned`; `controller-test`: "no new Job after a cordon"). |
+| A failed bootstrap is retried in a loop against a host (a wrong key, a refused host key) | D | The controller never replaces a failed current Job; the Host stays `Failed` until its inputs change or an operator deletes the Job (`plan.rs`, `a_failed_job_is_kept_and_not_retried`). |
+| A Host bootstraps into a missing or `Shared` zone | T | No Job until the zone exists and validates (`phase.rs`, `a_missing_zone_holds_a_host_that_has_not_started`; `controller-test`). |
+| A Host name longer than a label value is truncated into another host's label | T | The CRD refuses names over 63 characters (CEL rule in `deploy/crds/faubourg.firestoned.io_hosts.yaml`; `controller-test`), and the builder refuses them too. |
+| The controller starts with an image by tag, or with a malformed namespace or script source | T | It refuses to start (`config.rs`, `the_image_is_required_and_must_be_pinned`, `a_malformed_default_script_is_refused`; `controller-test`: "the controller refuses an image by tag"). An image other than A-8's is refused by the API server anyway. |
+| Two controller instances race and write conflicting state | T | `replicas: 1`, `Recreate` (`deploy/controller/deployment.yaml`). Every write is idempotent: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller`. |
+| A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
+| The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch` on `providers.banlieue.io` only (`deploy/rbac/controller.yaml`; `vap-test` checks it cannot patch a Provider or read a Secret there). |
 | A forged `Provider` status marks a host healthy | S | Out of faubourg's control: whoever can write `Provider` status is inside banlieue's trust boundary (banlieue's threat model). faubourg only reads it. |
 | A status message leaks a credential or command line | I | Phase messages are fixed strings or the validation summary, which names fields, never values from Secrets (`phase.rs`, `Decision::message`). |
+| The controller's logs leak an address or a secret | I | Logs carry Host, zone and Job names, phases and reasons only (`controller.rs`); the controller never reads a Secret. `controller-test` fails if a fixture address appears in the logs. |
+| Two Providers labelled with one host, and faubourg reports the healthier | S | More than one is `ProviderAmbiguous`, never `Ready` (`health.rs`, `of_labelled`; `plan.rs`, `two_labelled_providers_are_never_picked_from`; `controller-test`). |
 
 ### TB-2: Job pod → mounted Secret(s) and script source
 
@@ -158,9 +178,16 @@ flowchart LR
 - Bootstrap Jobs are admitted only in the bootstrap shape, and Pods in the credentials
   namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
   against a real API server (`make vap-test`).
-- The controller holds no access to Secrets or ConfigMaps (`deploy/rbac/controller.yaml`).
+- The controller holds no access to Secrets or ConfigMaps (`deploy/rbac/controller.yaml`), and
+  runs with that RBAC in `make controller-test`, which fails on any RBAC refusal.
+- Every reconcile decision is a pure, unit-tested function (`plan.rs`); the controller only
+  counts Jobs its Host owns, never retries a failed bootstrap, and refuses to start with an
+  unpinned image (`config.rs`).
+- The controller Deployment runs non-root, read-only root, all capabilities dropped,
+  `RuntimeDefault` seccomp (`deploy/controller/deployment.yaml`).
 - Supply chain: `banlieue-api` comes from crates.io, pinned to an exact version (`Cargo.toml`),
-  and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`). CI
+  and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`); the one
+  non-code license, CDLA-Permissive-2.0, is allowed for `webpki-root-certs` only. CI
   (`.github/workflows/build.yaml`) verifies commit signatures and DCO sign-off, runs
   cargo-audit and cargo-deny, and refuses real infrastructure identifiers; every third-party
   action is SHA-pinned and the top-level token is `contents: read`. CodeQL (`codeql.yaml`),
@@ -170,11 +197,12 @@ flowchart LR
 
 | ID | Risk | Revisit when |
 | --- | --- | --- |
-| R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | The reconciler lands: decide whether the script's digest is pinned in A-8 too. |
+| R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | Re-bootstrap on changed script content is designed (roadmap 01): decide then whether the script's digest is pinned in A-8 too. |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
-| R-3 | The controls marked planned above do not exist yet. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
+| R-3 | The controls marked planned above do not exist yet: the bootstrap image (host key verification, placement, revoke), Provider creation, a published controller image. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
 | R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
+| R-7 | Until faubourg creates Providers, whoever can label one in banlieue's namespace decides which Provider is a host's, and so can make a Host `Ready`. They can already create a Provider banlieue places on, so this grants nothing new (ADR-0009 consequences). | faubourg creates Providers and owns the label by field manager (roadmap 01). |
 | R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
@@ -188,8 +216,11 @@ flowchart LR
 - kube-controller-manager runs with `--use-service-account-credentials`, so Job pods are
   created as `system:serviceaccount:kube-system:job-controller`. Without it the Pod rule
   refuses every bootstrap pod (fails closed). Verify on each distribution, k0s included.
-- Re-bootstrap on a changed script source (ADR-0005 decision 8) needs the controller to see
-  that the source changed, and it has no ConfigMap access. To be designed with the reconciler.
+- A changed script *content* under the same source name re-runs nothing: the controller has
+  no ConfigMap access, so it cannot see the change (ADR-0009 decision 6). A changed source
+  *name* does re-run. Open in roadmap 01.
+- One controller replica, no leader election (ADR-0009 decision 1): an outage delays phase
+  updates and new bootstraps, and changes nothing on the hosts.
 
 ## 10. Revision log
 
@@ -198,3 +229,4 @@ flowchart LR
 | 2026-11-07 | 0001 … 0007 | First pass, written with the architecture. Single install script and scoped sudo rule (ADR-0005). |
 | 2026-11-07 | 0001 … 0007 | Second pass: ADR-0003 … ADR-0007 accepted; the phase machine and `Provider` health shipped (TB-1 rows added); CI and supply-chain hardening recorded; the Job namespace question raised. R-1 … R-4 unchanged: no reconciler or Job exists yet, so R-3 stays open. |
 | 2026-11-07 | 0001 … 0008 | Third pass: ADR-0008 (admission policy) and the ADR-0002 and ADR-0005 amendments. The Job builder, the admission policy and the controller RBAC shipped and are tested on a real API server; TB-1 and TB-2 rows rewritten; A-8, R-5, R-6 and three actors added; the Job namespace question closed (credentials namespace). R-3 stays open: no reconciler or bootstrap image yet. |
+| 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Accepted) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |

@@ -8,7 +8,10 @@
 # Pods there (for the termination message that carries ScriptDrift). It has nothing on
 # Secrets, ConfigMaps, Pod subresources (exec, attach, port-forward) or the admission policy
 # objects, anywhere. What its Jobs may contain is decided by the admission policy, not by
-# this file. Access to banlieue Providers and Leases comes with the Provider work (roadmap 01).
+# this file. In banlieue's namespace it reads Providers, for the host's health (ADR-0009
+# decision 12); creating and labelling them comes with the Provider work (roadmap 01).
+# Rename `banlieue-system` below if banlieue runs elsewhere, and pass the same name as
+# --provider-namespace.
 ---
 apiVersion: v1
 kind: Namespace
@@ -84,6 +87,30 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: faubourg-controller-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-controller
+    namespace: faubourg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faubourg-controller-providers
+  namespace: banlieue-system
+rules:
+  - apiGroups: ["banlieue.io"]
+    resources: ["providers"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faubourg-controller-providers
+  namespace: banlieue-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faubourg-controller-providers
 subjects:
   - kind: ServiceAccount
     name: faubourg-controller

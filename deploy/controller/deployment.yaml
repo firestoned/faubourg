@@ -1,0 +1,70 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Host controller (ADR-0009). One replica, Recreate: there is no leader election yet, and
+# every write it makes is idempotent, so a brief overlap during a rollout is safe.
+#
+# Apply after deploy/crds, deploy/rbac and deploy/admission. Set:
+#   - the controller image: not published yet (roadmap 01); replace the placeholder below;
+#   - FAUBOURG_BOOTSTRAP_IMAGE: the same digest-pinned image as `image` in
+#     deploy/admission/bootstrap-policy-params.yaml, or the API server refuses every Job.
+# The controller refuses to start with an image not pinned by digest.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: faubourg-controller
+  namespace: faubourg-system
+  labels:
+    app.kubernetes.io/name: faubourg-controller
+    app.kubernetes.io/component: host-controller
+    app.kubernetes.io/managed-by: faubourg
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: faubourg-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: faubourg-controller
+        app.kubernetes.io/component: host-controller
+    spec:
+      serviceAccountName: faubourg-controller
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ghcr.io/firestoned/faubourg-controller@sha256:<digest>
+          env:
+            - name: FAUBOURG_BOOTSTRAP_IMAGE
+              value: ghcr.io/firestoned/faubourg-bootstrap@sha256:<digest>
+            - name: FAUBOURG_CREDENTIALS_NAMESPACE
+              value: faubourg-credentials
+            - name: FAUBOURG_BOOTSTRAP_SERVICE_ACCOUNT
+              value: faubourg-bootstrap
+            - name: FAUBOURG_DEFAULT_SCRIPT
+              value: ConfigMap/faubourg-install
+            - name: FAUBOURG_PROVIDER_NAMESPACE
+              value: banlieue-system
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
