@@ -39,6 +39,8 @@ Every CI job calls a Make target, so everything runs the same locally.
 | `make calm-validate` | Validate the CALM model. Needs Node.js. |
 | `make calm-diagrams` | Render the Mermaid diagrams from the model. |
 | `make vap-test` | The bootstrap admission policy and controller RBAC against a throwaway kind cluster ([ADR-0008](adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)). Needs kind, kubectl, jq; set `KIND_EXPERIMENTAL_PROVIDER=podman` for rootless podman. Runs in CI. |
+| `make bootstrap-image` | Build the bootstrap image with podman: one static binary, no shell ([ADR-0010](adr/0010-bootstrap-image.md)). |
+| `make bootstrap-test` | The bootstrap image against a throwaway OpenSSH host, run the way a Job runs it (read-only, UID 65532, no capabilities). Needs podman, ssh-keygen, jq. Runs in CI. |
 | `make controller-test` | The Host controller binary, with its own ServiceAccount's token, against a throwaway kind cluster ([ADR-0009](adr/0009-host-reconciler.md)). Same tools as `vap-test`. Runs in CI. |
 | `make docs` | Build this site with `mkdocs build --strict`. Needs Poetry. |
 | `make docs-serve` | Serve this site with live reload on port 8000. |

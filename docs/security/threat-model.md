@@ -5,15 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0009** (all Accepted; ADR-0002, ADR-0005 and ADR-0007
-> amended). Fourth pass: the shipped code is
-> `crates/faubourg-api` (types, validation, the SSH Secret contract) and
-> `crates/faubourg-controller`, now including the Host reconciler (`plan.rs` decides,
-> `controller.rs` carries it out) and the `faubourg-controller` binary, with the admission
-> policy, the RBAC and the controller Deployment in `deploy/`. The policy (`make vap-test`)
-> and the controller running with its own RBAC (`make controller-test`) are tested against a
-> real API server, in CI. No bootstrap image and no published controller image exist yet, and
-> faubourg does not create Providers yet. Every control below that lives in a planned
+> defined by **ADR-0001 … ADR-0010** (ADR-0001 … ADR-0009 Accepted, ADR-0010 Proposed;
+> ADR-0002, ADR-0005 and ADR-0007 amended). Fifth pass: the shipped code is
+> `crates/faubourg-api` (types, validation, the SSH Secret contract, the Job-to-image
+> contract), `crates/faubourg-controller` (the Host reconciler and its binary) and
+> `crates/faubourg-bootstrap` (the bootstrap image's binary, on russh), with the admission
+> policy, the RBAC and the controller Deployment in `deploy/` and the image in
+> `images/bootstrap/`. The policy (`make vap-test`), the controller with its own RBAC
+> (`make controller-test`) and the image against a real OpenSSH host (`make bootstrap-test`)
+> are tested in CI. No image is published yet, faubourg does not create Providers yet, and
+> nothing has run against a real hypervisor. Every control below that lives in a planned
 > component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
@@ -42,7 +43,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Controller and bootstrap identities, RBAC | shipped as manifests, tested on kind | `deploy/rbac/controller.yaml` |
 | Host controller (reconciler, binary) | shipped, tested on kind with its own RBAC; image not published | `crates/faubourg-controller/src/{plan,controller,config,main}.rs`, `deploy/controller/`, `scripts/controller-test.sh` |
 | Creating and labelling Providers | planned, roadmap 01 | |
-| Bootstrap image (SSH client) | planned, roadmap 01 | |
+| Bootstrap image (SSH client) | shipped as source and Containerfile, tested against OpenSSH; not published | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
 | Zone controller | planned, roadmap 02 | |
 
 ## 3. Assets
@@ -81,12 +82,12 @@ flowchart LR
     op[Operator] -->|CRs, Secrets, script| kube[(Kubernetes API)]
     subgraph cluster [Cluster]
         ctl[Host / Zone controllers]
-        job[Bootstrap Job]
+        job[Bootstrap Job: faubourg-bootstrap, no shell]
     end
     kube -.->|evaluates every Job and Pod in the credentials namespace| vap{{Bootstrap admission policy}}
     ctl -->|TB-1: Hosts, zones, its Jobs, Providers, status| kube
     job -->|TB-2 mounts| kube
-    job -->|TB-3 SSH| host
+    job -->|TB-3 SSH: host key checked before auth, constant commands| host
     subgraph host [Cloud Hypervisor host]
         sshd[sshd] --> script["/opt/faubourg/install.sh (root)"]
         script -->|TB-4 HTTPS| repo[(internal repository)]
@@ -140,10 +141,12 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Job for host A mounts host B's credential | I, E | The builder mounts only the Secrets the Host names (`job.rs`, `it_mounts_only_its_hosts_secrets_and_the_script`). A compromised controller can still pair any key Secret with any address, but cannot read the key: the pinned image only uses it to authenticate, after verifying the host key (ADR-0008 decision 5, a requirement on the planned image). See R-5. |
+| Job for host A mounts host B's credential | I, E | The builder mounts only the Secrets the Host names (`job.rs`, `it_mounts_only_its_hosts_secrets_and_the_script`). A compromised controller can still pair any key Secret with any address, but cannot read the key: the pinned image only uses it to authenticate, after verifying the host key (ADR-0008 decision 5, `crates/faubourg-bootstrap/src/ssh.rs`). See R-5. |
 | A missing Secret starts the pod without a credential | D | Secret volumes are not `optional` (`job.rs`). |
 | The Job's environment carries a secret or a command line | I | Env holds only Host name, address, port, host key policy, the pinned fingerprint and the revoke flag, all literal (`job.rs`, `the_environment_is_literal_and_carries_only_connection_settings`, `the_job_names_secrets_but_holds_no_secret_material`). |
-| Credential printed to logs | I | `Sensitive` redacts `Debug` (`crates/faubourg-api/src/credentials.rs`, `debug_never_prints_secret_material`). The Job's logging is planned. |
+| Credential printed to logs | I | `Sensitive` redacts `Debug` (`crates/faubourg-api/src/credentials.rs`, `debug_never_prints_secret_material`). The image's `Config` prints names and sizes only (`crates/faubourg-bootstrap/src/config.rs`, `debug_shows_no_script_and_no_credential`); errors name inputs, never values (`errors_never_carry_the_value`). `bootstrap-test` fails if a key or the script's content reaches the log. |
+| The image runs something other than the bootstrap: a shell, a debugger, another program in the image | E | The image is one static binary on `scratch`: no shell, no package manager, no `ssh` (`images/bootstrap/Containerfile`; `bootstrap-test`: "the image has no shell"). The policy already forbids a command (ADR-0008). |
+| A malformed mount or environment makes the image act on a default | T | Every input is validated before a connection is opened; anything missing or malformed exits 1 (`config.rs`, `malformed_environment_is_refused`, `no_run_credential_or_script_is_refused`). |
 | Malformed username used as an option to ssh | E | `is_login_name` (`credentials.rs`). |
 | Ambiguous credential (key and password) | S | Refused, `CredentialError::Ambiguous`. |
 | Placement and run credential are the same Secret, so the scoped one is privileged | E | Refused, `REASON_SHARED_CREDENTIAL` (`host.rs`). |
@@ -152,11 +155,15 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Man in the middle on first connection | S, I | `hostKeyPolicy: Strict` is the default (`host.rs`, `defaults_are_the_safe_ones`); TOFU must be explicit and its fingerprint is pinned in status and passed to the Job (`job.rs`, `a_pinned_tofu_fingerprint_is_passed_on`). Enforcement is in the planned bootstrap image, which must treat a Secret with `knownHosts` as `Strict` whatever the Job's env says (ADR-0008 decision 5). |
+| Man in the middle | S, I | The host key is judged in russh's `check_server_key`, before any authentication is sent (`crates/faubourg-bootstrap/src/ssh.rs`). `Strict` is the default (`host.rs`, `defaults_are_the_safe_ones`) and accepts nothing without `knownHosts`; a Secret with `knownHosts` is always strict (`hostkey.rs`, `known_hosts_overrides_trust_on_first_use`); `@revoked`, hashed and wildcard lines never admit a key (`hostkey.rs` tests). Every connection of a run must see the first one's key (`first_use_accepts_the_first_key_then_only_it`). RSA host keys and host certificates are refused. All of it is exercised against OpenSSH in `bootstrap-test`. |
+| TOFU pins an attacker's key, or a pod pins junk into a Host | S, T | TOFU must be explicit; the first connection is open to interception (accepted, R-8). The controller pins a fingerprint only from the Host's own succeeded Job, read from that Job's own pod, only when well-formed and none is pinned yet; a pinned key is never replaced (`plan.rs`, `a_first_use_key_is_pinned_from_a_succeeded_job`, `a_pinned_key_is_never_replaced`, `no_key_is_pinned_from_a_failed_job_a_strict_host_or_another_jobs_pod`, `a_malformed_report_pins_nothing`). |
+| A Host field or the script becomes a shell command on the host | E | Every command is a constant (`crates/faubourg-bootstrap/src/remote.rs`); the script, the sudo rule and a key to revoke travel on stdin. The programs set their own `PATH` and contain no single quote (`programs_survive_single_quoting`). |
+| A half-written script or sudo rule is left in place | T | Both are written to a temporary file in the same directory and moved into place; the rule only after `visudo -cf` accepts it; the result is checked again with the scoped account before anything runs (`steps.rs`, `placement_writes_script_and_rule_checks_again_then_runs`, `still_not_in_place_after_placement_is_drift`). |
+| The script is in place but writable by someone other than root | E | "In place" requires `root:root 0755` on `/opt/faubourg` and the script, not only the hash (`remote.rs`, `in_place_needs_owner_mode_and_hash`; `bootstrap-test`: "a script made writable is drift, not run"). |
 | A retry loop hammers a host with a refused key, or re-runs after drift | D | `podFailurePolicy` fails the Job at once on exit 64 (`ScriptDrift`) and 65 (host key refused); other failures retry twice; one hour deadline (`job.rs`, `drift_and_a_refused_host_key_fail_the_job_without_retries`). |
-| Scoped account rewrites the script it may run as root | E | ADR-0005 decision 3: `/opt/faubourg` and the script are root-owned; sudoers allows only that path with no arguments (`examples/host/sudoers-faubourg`, `visudo -c` clean). Placement is in the planned Job. |
+| Scoped account rewrites the script it may run as root | E | ADR-0005 decision 3: `/opt/faubourg` and the script are root-owned; sudoers allows only that path with no arguments (`examples/host/sudoers-faubourg`; the image writes the same rule, `remote.rs`, `the_sudo_rule_allows_the_script_and_no_arguments`; `bootstrap-test` checks owner, mode and content). |
 | Script run with attacker arguments | E | Sudo rule forbids arguments (`""`); the script refuses any (`examples/host/install.sh`). |
-| Privileged placement key left on the host | E | `revokeAfterBootstrap` (ADR-0006 decision 4). Planned. |
+| Privileged placement key left on the host | E | `revokeAfterBootstrap` removes it from the placing account's `authorized_keys` right after a successful placement, and a `grep` error leaves the file untouched (`remote.rs`, `steps.rs`; `bootstrap-test`: the key is gone, only from that account, and no longer works). A password placement credential cannot be revoked by key: prefer a key. |
 
 ### TB-4: install script → artifact repository
 
@@ -178,6 +185,9 @@ flowchart LR
 - Bootstrap Jobs are admitted only in the bootstrap shape, and Pods in the credentials
   namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
   against a real API server (`make vap-test`).
+- The bootstrap image is one static binary with no shell, runs as UID 65532, verifies the
+  host key before authenticating, and sends only constant commands (`crates/faubourg-bootstrap`,
+  `images/bootstrap/Containerfile`), tested against OpenSSH (`make bootstrap-test`).
 - The controller holds no access to Secrets or ConfigMaps (`deploy/rbac/controller.yaml`), and
   runs with that RBAC in `make controller-test`, which fails on any RBAC refusal.
 - Every reconcile decision is a pure, unit-tested function (`plan.rs`); the controller only
@@ -187,7 +197,10 @@ flowchart LR
   `RuntimeDefault` seccomp (`deploy/controller/deployment.yaml`).
 - Supply chain: `banlieue-api` comes from crates.io, pinned to an exact version (`Cargo.toml`),
   and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`); the one
-  non-code license, CDLA-Permissive-2.0, is allowed for `webpki-root-certs` only. CI
+  non-code license, CDLA-Permissive-2.0, is allowed for `webpki-root-certs` only. russh is
+  pinned exactly with the `ring` backend and no RSA, so neither `rsa` (open timing advisory)
+  nor `aws-lc-rs` is in the tree; Dependabot reviews russh bumps in their own group, and the
+  Containerfiles' base images are pinned by digest. CI
   (`.github/workflows/build.yaml`) verifies commit signatures and DCO sign-off, runs
   cargo-audit and cargo-deny, and refuses real infrastructure identifiers; every third-party
   action is SHA-pinned and the top-level token is `contents: read`. CodeQL (`codeql.yaml`),
@@ -199,10 +212,12 @@ flowchart LR
 | --- | --- | --- |
 | R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | Re-bootstrap on changed script content is designed (roadmap 01): decide then whether the script's digest is pinned in A-8 too. |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
-| R-3 | The controls marked planned above do not exist yet: the bootstrap image (host key verification, placement, revoke), Provider creation, a published controller image. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
+| R-3 | The controls marked planned above do not exist yet: Provider creation, published and signed images, and a run against a real hypervisor. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
 | R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
 | R-7 | Until faubourg creates Providers, whoever can label one in banlieue's namespace decides which Provider is a host's, and so can make a Host `Ready`. They can already create a Provider banlieue places on, so this grants nothing new (ADR-0009 consequences). | faubourg creates Providers and owns the label by field manager (roadmap 01). |
+| R-8 | `TrustOnFirstUse` accepts whatever key answers the first connection. Mitigated: explicit opt-in, pinned after the first success, `knownHosts` overrides it. | SSH host certificates are supported (ADR-0006 open question). |
+| R-9 | The SSH implementation is russh, with far less review than OpenSSH (ADR-0010 consequences). Mitigated: exact pin, its own Dependabot group, cargo-audit, the host-key decision in faubourg's own tested code, and an image with nothing else to attack. | A russh advisory, or a published audit. |
 | R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
@@ -230,3 +245,4 @@ flowchart LR
 | 2026-11-07 | 0001 … 0007 | Second pass: ADR-0003 … ADR-0007 accepted; the phase machine and `Provider` health shipped (TB-1 rows added); CI and supply-chain hardening recorded; the Job namespace question raised. R-1 … R-4 unchanged: no reconciler or Job exists yet, so R-3 stays open. |
 | 2026-11-07 | 0001 … 0008 | Third pass: ADR-0008 (admission policy) and the ADR-0002 and ADR-0005 amendments. The Job builder, the admission policy and the controller RBAC shipped and are tested on a real API server; TB-1 and TB-2 rows rewritten; A-8, R-5, R-6 and three actors added; the Job namespace question closed (credentials namespace). R-3 stays open: no reconciler or bootstrap image yet. |
 | 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Accepted) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |
+| 2026-11-07 | 0001 … 0010 | Fifth pass: ADR-0010 (the bootstrap image, Proposed). The image's binary shipped on russh and is tested against OpenSSH in CI; the controller pins first-use keys from succeeded Jobs. TB-2 and TB-3 rewritten from planned to shipped controls: host-key judgement before authentication, constant commands, atomic placement, owner and mode in "in place", revoke, logs. R-8 (first use) and R-9 (russh) added; R-3 narrowed to Provider creation, published images and a real hypervisor. |

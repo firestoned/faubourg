@@ -32,12 +32,27 @@ updates:
       # Declared first: a dependency joins the first group that matches it.
       kube-ecosystem:
         patterns: ["kube", "kube-*", "k8s-openapi"]
+      # The bootstrap image's SSH client decides how a host key is checked and a
+      # credential is used (ADR-0010): its bumps are reviewed on their own.
+      russh:
+        patterns: ["russh", "russh-*", "ssh-key"]
       # Everything else in one PR. Majors are included deliberately: cargo
       # treats a 0.x -> 0.y bump as major, so a minor/patch-only group would
       # leave most pre-1.0 crates as individual PRs.
       cargo:
         patterns: ["*"]
-        exclude-patterns: ["kube", "kube-*", "k8s-openapi"]
+        exclude-patterns: ["kube", "kube-*", "k8s-openapi", "russh", "russh-*", "ssh-key"]
+
+  # Base images, pinned by digest: the bootstrap image and the test sshd host.
+  - package-ecosystem: "docker"
+    directories: ["/images/bootstrap", "/test/sshd"]
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      images:
+        patterns: ["*"]
 
   # Documentation toolchain (pyproject.toml / poetry.lock).
   - package-ecosystem: "pip"

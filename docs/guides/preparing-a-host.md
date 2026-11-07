@@ -75,11 +75,13 @@ not the script maintainer's.
 
 === "faubourg places it"
 
-    Give the Host a **placement credential** (`ssh.placementSecretRef`): an account that can
-    write `/opt/faubourg` and `/etc/sudoers.d`. The Job uses it only when the host's copy of the
-    script is missing or differs from the source (sha256 compared). With
-    `ssh.revokeAfterBootstrap: true`, the Job removes the placement key from the host once
-    placement succeeds.
+    Give the Host a **placement credential** (`ssh.placementSecretRef`): `root`, or an account
+    with passwordless `sudo`. The Job uses it only when the host's copy of the script is
+    missing, differs from the source (sha256 compared), or is not `root:root 0755`. It writes
+    the script and the sudo rule through temporary files, checks the rule with `visudo -cf`,
+    then checks the result again with the scoped account. With
+    `ssh.revokeAfterBootstrap: true`, it then removes the placement key from that account's
+    `~/.ssh/authorized_keys`.
 
 === "You place it out of band"
 
@@ -91,7 +93,7 @@ not the script maintainer's.
 ## Then the run
 
 With the script in place, the Job connects as the scoped account, compares the on-host script's
-sha256 with the source, and runs:
+owner, mode and sha256 with the source, and runs:
 
 ```sh
 sudo -n /opt/faubourg/install.sh

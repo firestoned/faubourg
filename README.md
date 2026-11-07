@@ -66,10 +66,12 @@ Job are still planned (accepted risk R-3 in the [threat model](docs/security/thr
 | Area | State |
 | --- | --- |
 | Architecture: [ADR-0001 … ADR-0009](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
+| [ADR-0010](docs/adr/0010-bootstrap-image.md): the bootstrap image | proposed |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
 | [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); no published image yet |
 | [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
-| Bootstrap image, Provider creation, controller image | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
+| [Bootstrap image](images/bootstrap/) ([ADR-0010](docs/adr/0010-bootstrap-image.md)) | implemented, tested against a real OpenSSH host (`make bootstrap-test`); not published yet |
+| Provider creation, published images | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller and cordon | not started ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
@@ -95,6 +97,7 @@ The same pages are published at <https://firestoned.github.io/faubourg/>.
 | Path | What |
 | --- | --- |
 | [`crates/faubourg-api/`](crates/faubourg-api/) | CRD types and validation; `make crds` writes [`deploy/crds/`](deploy/crds/) |
+| [`crates/faubourg-bootstrap/`](crates/faubourg-bootstrap/) | The bootstrap image's one binary: host key, placement, run, on russh |
 | [`crates/faubourg-controller/`](crates/faubourg-controller/) | The Host controller: pure functions first, then the `faubourg-controller` binary |
 | [`deploy/admission/`](deploy/admission/) | The bootstrap admission policy and its parameters |
 | [`deploy/rbac/`](deploy/rbac/) | Namespaces, identities and RBAC for the controller and its Jobs |

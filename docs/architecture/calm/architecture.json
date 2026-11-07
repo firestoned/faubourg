@@ -35,7 +35,7 @@
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job",
-      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg's digest-pinned bootstrap image, mounts only that host's SSH Secret(s) and an allowlisted install script source, places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006, ADR-0008)."
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
@@ -200,7 +200,7 @@
     },
     {
       "unique-id": "rel-host-controller-kube",
-      "description": "Watches Host, AvailabilityZone, its own Jobs (by owner UID) in the credentials namespace and Providers in banlieue's namespace; reads Pods there for a failed Job's exit code; creates and deletes Jobs; applies Host status. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008, ADR-0009).",
+      "description": "Watches Host, AvailabilityZone, its own Jobs (by owner UID) in the credentials namespace and Providers in banlieue's namespace; reads Pods there for a failed Job's exit code and a succeeded Job's host key fingerprint (ADR-0010 decision 8); creates and deletes Jobs; applies Host status. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008, ADR-0009).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -272,7 +272,7 @@
     },
     {
       "unique-id": "rel-job-ssh",
-      "description": "SSH (CALM has no SSH protocol value). Strict host key verification (or recorded TOFU). Placement with the privileged credential when needed, then the one scoped sudo command; no CR field reaches a shell (ADR-0005).",
+      "description": "SSH (CALM has no SSH protocol value). Strict host key verification (or recorded TOFU). Placement with the privileged credential when needed, then the one scoped sudo command; no CR field reaches a shell (ADR-0005). Host key verified before any authentication (ADR-0010 decision 4).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -404,6 +404,7 @@
     "docs/adr/0006-ssh-credentials.md",
     "docs/adr/0007-health-from-the-banlieue-provider.md",
     "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md",
-    "docs/adr/0009-host-reconciler.md"
+    "docs/adr/0009-host-reconciler.md",
+    "docs/adr/0010-bootstrap-image.md"
   ]
 }
