@@ -1,0 +1,386 @@
+{
+  "$schema": "https://calm.finos.org/release/1.2/meta/calm.json",
+  "nodes": [
+    {
+      "unique-id": "actor-platform-operator",
+      "node-type": "actor",
+      "name": "Platform Operator",
+      "description": "Registers hosts and zones as Host and AvailabilityZone objects, creates each host's SSH Secret in the credentials namespace, and cordons hosts. Never runs commands on a hypervisor by hand once faubourg manages it."
+    },
+    {
+      "unique-id": "actor-vm-consumer",
+      "node-type": "actor",
+      "name": "VM Consumer",
+      "description": "Requests VMs, pools or claims from banlieue and targets a zone with a providerSelector on the faubourg zone label (ADR-0003). Never sees faubourg objects."
+    },
+    {
+      "unique-id": "system-faubourg",
+      "node-type": "system",
+      "name": "faubourg",
+      "description": "The control plane: inventory of hosts, grouping into availability zones, remote bootstrap, zone health. Ships no host agent and no VM scheduler (ADR-0002)."
+    },
+    {
+      "unique-id": "service-host-controller",
+      "node-type": "service",
+      "name": "Host controller (planned, roadmap 01)",
+      "description": "Reconciles Host: validates the zone, creates the bootstrap Job, creates and labels the host's banlieue Provider, derives the phase from the Job and the Provider (ADR-0005, ADR-0007). Never reads SSH Secrets."
+    },
+    {
+      "unique-id": "service-zone-controller",
+      "node-type": "service",
+      "name": "Zone controller (planned, roadmap 02)",
+      "description": "Reconciles AvailabilityZone: rejects storage.mode Shared in v1 (ADR-0004), counts member hosts, publishes Ready."
+    },
+    {
+      "unique-id": "service-bootstrap-job",
+      "node-type": "service",
+      "name": "Bootstrap Job (planned, roadmap 01)",
+      "description": "One Kubernetes Job per Host generation. Mounts only that host's SSH Secret(s) and the install script source. Places /opt/faubourg/install.sh root-owned with the privileged placement credential when absent or changed, then runs sudo -n /opt/faubourg/install.sh with the scoped credential (ADR-0005, ADR-0006)."
+    },
+    {
+      "unique-id": "data-asset-host-az-crs",
+      "node-type": "data-asset",
+      "name": "Host and AvailabilityZone CRs",
+      "description": "Cluster-scoped faubourg.firestoned.io/v1alpha1 objects; the Rust types in faubourg-api are the source of truth (ADR-0003)."
+    },
+    {
+      "unique-id": "data-asset-ssh-secret",
+      "node-type": "data-asset",
+      "name": "Host SSH Secret",
+      "description": "Root-equivalent bootstrap credential, one per host, in the credentials namespace. Key or SSH certificate preferred, password discouraged, knownHosts pins the host key (ADR-0006)."
+    },
+    {
+      "unique-id": "ecosystem-kube-api",
+      "node-type": "ecosystem",
+      "name": "Kubernetes API server",
+      "description": "The only transport between faubourg and banlieue: CRDs, Jobs, Leases."
+    },
+    {
+      "unique-id": "system-banlieue",
+      "node-type": "system",
+      "name": "banlieue",
+      "description": "VM lifecycle platform. Its controller, scheduler and operator place VMs across Provider failure domains, read provider Leases, and run nothing on the hosts directly (banlieue ADR-0060, ADR-0098, ADR-0102)."
+    },
+    {
+      "unique-id": "data-asset-provider-cr",
+      "node-type": "data-asset",
+      "name": "banlieue Provider (one per host)",
+      "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager; its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007)."
+    },
+    {
+      "unique-id": "system-ch-host",
+      "node-type": "system",
+      "name": "Cloud Hypervisor host",
+      "description": "A bare-metal KVM machine prepared by banlieue host cloud-hypervisor install."
+    },
+    {
+      "unique-id": "data-asset-install-script",
+      "node-type": "data-asset",
+      "name": "Install script source",
+      "description": "ConfigMap or Secret holding install.sh. The default downloads a pinned banlieue binary, verifies its sha256 and runs banlieue host cloud-hypervisor install (ADR-0005)."
+    },
+    {
+      "unique-id": "data-asset-host-install-script",
+      "node-type": "data-asset",
+      "name": "/opt/faubourg/install.sh",
+      "description": "root:root 0755 under a root-owned directory; the scoped account's only sudo rule runs it with no arguments, and cannot write it (ADR-0005)."
+    },
+    {
+      "unique-id": "service-ssh",
+      "node-type": "service",
+      "name": "sshd",
+      "description": "The host's SSH daemon. Reached only by bootstrap Jobs, and optionally closed to faubourg after bootstrap (ssh.revokeAfterBootstrap)."
+    },
+    {
+      "unique-id": "service-banlieue-ch-provider",
+      "node-type": "service",
+      "name": "banlieue Cloud Hypervisor provider",
+      "description": "Host-resident systemd service, outbound only to the Kubernetes API, supervising one cloud-hypervisor process per guest through template units (banlieue ADR-0060, ADR-0063). This is the host agent (ADR-0002)."
+    },
+    {
+      "unique-id": "service-cloud-hypervisor",
+      "node-type": "service",
+      "name": "cloud-hypervisor (one per VM)",
+      "description": "The VMM, REST API on a local unix socket, started by the provider as a systemd template unit instance."
+    },
+    {
+      "unique-id": "network-host-mgmt",
+      "node-type": "network",
+      "name": "Host management network",
+      "description": "The path from cluster nodes to each host's SSH port and from each host to the Kubernetes API. Exact topology is an open question (ADR-0005)."
+    }
+  ],
+  "relationships": [
+    {
+      "unique-id": "rel-faubourg-composition",
+      "description": "faubourg is two reconcilers and the Jobs one of them creates, guarding the inventory objects.",
+      "relationship-type": {
+        "composed-of": {
+          "container": "system-faubourg",
+          "nodes": [
+            "service-host-controller",
+            "service-zone-controller",
+            "service-bootstrap-job",
+            "data-asset-host-az-crs"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-host-composition",
+      "description": "What runs on a prepared host.",
+      "relationship-type": {
+        "composed-of": {
+          "container": "system-ch-host",
+          "nodes": [
+            "service-ssh",
+            "data-asset-host-install-script",
+            "service-banlieue-ch-provider",
+            "service-cloud-hypervisor"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-banlieue-composition",
+      "description": "banlieue's objects faubourg writes and reads.",
+      "relationship-type": {
+        "composed-of": {
+          "container": "system-banlieue",
+          "nodes": [
+            "data-asset-provider-cr"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-host-deployed-in-mgmt",
+      "description": "Hosts sit on the management network.",
+      "relationship-type": {
+        "deployed-in": {
+          "container": "network-host-mgmt",
+          "nodes": [
+            "system-ch-host"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-operator-registers",
+      "description": "The operator declares hosts, zones and SSH Secrets.",
+      "relationship-type": {
+        "interacts": {
+          "actor": "actor-platform-operator",
+          "nodes": [
+            "data-asset-host-az-crs",
+            "data-asset-ssh-secret",
+            "data-asset-install-script"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-consumer-requests",
+      "description": "The consumer asks banlieue for VMs and may select a zone by label.",
+      "relationship-type": {
+        "interacts": {
+          "actor": "actor-vm-consumer",
+          "nodes": [
+            "system-banlieue"
+          ]
+        }
+      }
+    },
+    {
+      "unique-id": "rel-host-controller-kube",
+      "description": "Watches Host, AvailabilityZone, Job and Provider; creates Jobs and Providers; reads Leases in banlieue's workload namespace. No Secret access in the credentials namespace.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-host-controller"
+          },
+          "destination": {
+            "node": "ecosystem-kube-api"
+          }
+        }
+      },
+      "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-zone-controller-kube",
+      "description": "Watches AvailabilityZone and Host; writes AvailabilityZone status.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-zone-controller"
+          },
+          "destination": {
+            "node": "ecosystem-kube-api"
+          }
+        }
+      },
+      "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-job-secret",
+      "description": "The Job's pod mounts exactly one host's Secret(s) as a volume; the controller never fetches them.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-bootstrap-job"
+          },
+          "destination": {
+            "node": "data-asset-ssh-secret"
+          }
+        }
+      }
+    },
+    {
+      "unique-id": "rel-job-script-source",
+      "description": "The Job mounts the script source and compares its sha256 with the on-host script.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-bootstrap-job"
+          },
+          "destination": {
+            "node": "data-asset-install-script"
+          }
+        }
+      }
+    },
+    {
+      "unique-id": "rel-job-ssh",
+      "description": "SSH (CALM has no SSH protocol value). Strict host key verification (or recorded TOFU). Placement with the privileged credential when needed, then the one scoped sudo command; no CR field reaches a shell (ADR-0005).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-bootstrap-job"
+          },
+          "destination": {
+            "node": "service-ssh"
+          }
+        }
+      },
+      "protocol": "TCP"
+    },
+    {
+      "unique-id": "rel-provider-kube",
+      "description": "Outbound only: renews its Lease every 5 seconds and writes its Provider status and machines (banlieue ADR-0060, ADR-0102).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-banlieue-ch-provider"
+          },
+          "destination": {
+            "node": "ecosystem-kube-api"
+          }
+        }
+      },
+      "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-provider-vmm",
+      "description": "The VMM REST API over the guest's unix socket (banlieue ADR-0061).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-banlieue-ch-provider"
+          },
+          "destination": {
+            "node": "service-cloud-hypervisor"
+          }
+        }
+      },
+      "protocol": "HTTP"
+    },
+    {
+      "unique-id": "rel-banlieue-provider-cr",
+      "description": "banlieue's scheduler reads each Provider's failure domain, labels, capacity and heartbeat to place VMs (banlieue ADR-0098, ADR-0107).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "system-banlieue"
+          },
+          "destination": {
+            "node": "data-asset-provider-cr"
+          }
+        }
+      }
+    },
+    {
+      "unique-id": "rel-host-controller-provider-cr",
+      "description": "Creates the host's Provider and owns its zone, host and cordon labels by field manager (ADR-0003).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-host-controller"
+          },
+          "destination": {
+            "node": "data-asset-provider-cr"
+          }
+        }
+      }
+    }
+  ],
+  "flows": [
+    {
+      "unique-id": "flow-add-host",
+      "name": "Add a host to a zone",
+      "description": "From a new Host object to a host banlieue can place VMs on.",
+      "transitions": [
+        {
+          "sequence-number": 1,
+          "relationship-unique-id": "rel-operator-registers",
+          "description": "Operator creates the SSH Secret and a Host with zoneRef."
+        },
+        {
+          "sequence-number": 2,
+          "relationship-unique-id": "rel-host-controller-kube",
+          "description": "Host controller checks the zone is supported and creates the bootstrap Job; phase Bootstrapping."
+        },
+        {
+          "sequence-number": 3,
+          "relationship-unique-id": "rel-job-secret",
+          "description": "The Job's pod mounts that host's Secret(s) and the script source."
+        },
+        {
+          "sequence-number": 4,
+          "relationship-unique-id": "rel-job-ssh",
+          "description": "The Job verifies the host key, places the script if absent or changed, and runs sudo -n /opt/faubourg/install.sh."
+        },
+        {
+          "sequence-number": 5,
+          "relationship-unique-id": "rel-host-controller-provider-cr",
+          "description": "Host controller creates the Provider with the zone labels."
+        },
+        {
+          "sequence-number": 6,
+          "relationship-unique-id": "rel-provider-kube",
+          "description": "The host-resident provider starts, renews its Lease and publishes its failure domain."
+        },
+        {
+          "sequence-number": 7,
+          "relationship-unique-id": "rel-banlieue-provider-cr",
+          "description": "Provider Ready and heartbeat Alive: Host Ready; banlieue may place VMs on it."
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "project": "faubourg: availability zones over banlieue's Cloud Hypervisor hosts",
+    "repository": "https://github.com/firestoned/faubourg",
+    "license": "Apache-2.0",
+    "calm-schema-version": "1.2",
+    "phase": "Architecture only. faubourg-api types exist; the controllers and the bootstrap Job are planned (roadmap 01)."
+  },
+  "adrs": [
+    "docs/adr/0001-record-architecture-decisions.md",
+    "docs/adr/0002-banlieue-provider-is-the-host-agent.md",
+    "docs/adr/0003-availabilityzone-and-host-crds.md",
+    "docs/adr/0004-v1-local-storage-only.md",
+    "docs/adr/0005-bootstrap-runs-one-scoped-install-script.md",
+    "docs/adr/0006-ssh-credentials.md",
+    "docs/adr/0007-health-from-the-banlieue-provider.md"
+  ]
+}
