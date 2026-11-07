@@ -5,12 +5,16 @@
 
 Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 
-- [x] `banlieue-api` pinned by git rev (kube ~4.2, k8s-openapi 0.28)
+- [x] `banlieue-api` from crates.io, pinned `=0.4.14` (kube ~4.2, k8s-openapi 0.28; ADR-0002 decision 4)
 - [x] Host phase machine (Pending, Bootstrapping, Ready, Degraded, Failed) as a pure function, and `Provider` health read fail closed (`crates/faubourg-controller`)
 - [ ] Host reconciler: validate, compute the phase with `phase::decide`, write phase and conditions
-- [ ] ADR-0005 amendment: the namespace the bootstrap Job runs in. A pod mounts Secrets and ConfigMaps only from its own namespace, but ADR-0005 puts the script source in the controller's namespace and ADR-0006 puts the SSH Secrets in the credentials namespace
-- [ ] Bootstrap Job builder: mounts only the Host's Secret(s) and the script source; RBAC for the controller has no Secret read in the credentials namespace
-- [ ] Job image: ssh client, sha256 compare of on-host script, placement, `sudo -n /opt/faubourg/install.sh`, `ScriptDrift`
+- [x] ADR-0005 amendment: the bootstrap Job and the script source live in the credentials namespace
+- [x] ADR-0008: a ValidatingAdmissionPolicy constrains every Job and Pod in the credentials namespace (`deploy/admission/`), tested on kind (`make vap-test`)
+- [x] Bootstrap Job builder (`job.rs`): mounts only the Host's Secret(s) and the script source; controller RBAC with no Secret or ConfigMap access (`deploy/rbac/controller.yaml`)
+- [ ] `make vap-test` in CI (a kind job in `build.yaml`)
+- [ ] Refuse Host names longer than 63 in the CRD (a label value, and the builder already refuses them)
+- [ ] Re-bootstrap on a changed script source without giving the controller ConfigMap access (ADR-0005 decision 8)
+- [ ] Bootstrap image: ssh client, host key verified before authenticating and always `Strict` when the Secret has `knownHosts` (ADR-0008 decision 5), sha256 compare of the on-host script, placement, `sudo -n /opt/faubourg/install.sh`, exit 64 `ScriptDrift` and 65 host key refused
 - [ ] Strict host keys, TOFU fingerprint pinned in status, `revokeAfterBootstrap`
 - [ ] Create and label the host's banlieue `Provider` (field manager `faubourg.firestoned.io/host-controller`)
 - [ ] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102): the decision is in `health.rs` and `phase.rs`; the watch on Providers is the reconciler's

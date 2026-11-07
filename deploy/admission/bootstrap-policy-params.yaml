@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# Parameters for the bootstrap admission policy (ADR-0008 decision 2). Lives in
+# faubourg-system, not in the credentials namespace, so a script maintainer (who writes
+# ConfigMaps there) cannot change the image or the allowlist. The controller has no ConfigMap
+# write anywhere. A platform administrator edits this.
+#
+#   image               the bootstrap image, pinned by digest (placeholder below)
+#   serviceAccountName  the bootstrap pods' ServiceAccount (no RBAC)
+#   scriptSources       comma-separated, no spaces: ConfigMap/<name> or Secret/<name>
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: faubourg-bootstrap-policy
+  namespace: faubourg-system
+data:
+  image: "ghcr.io/firestoned/faubourg-bootstrap@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  serviceAccountName: faubourg-bootstrap
+  scriptSources: "ConfigMap/faubourg-install"

@@ -37,6 +37,9 @@ tables below.
 
 `kubectl get hosts` shows `Zone`, `Address`, `Phase` and `Cordoned`.
 
+A Host's name is at most 63 characters: it becomes a label value on its `Provider` and its
+bootstrap Job, and the Job builder refuses a longer one.
+
 ### spec
 
 | Field | Type | Default | Notes |
@@ -50,7 +53,7 @@ tables below.
 | `ssh.hostKeyPolicy` | `Strict` \| `TrustOnFirstUse` | `Strict` | |
 | `ssh.revokeAfterBootstrap` | bool | `false` | Remove the placement key once placement succeeds. |
 | `bootstrap.method` | `Script` \| `None` | `Script` | `None` adopts a host that already runs banlieue's provider. |
-| `bootstrap.scriptRef.kind` | `ConfigMap` \| `Secret` | | Where the install script lives, in the controller's namespace. |
+| `bootstrap.scriptRef.kind` | `ConfigMap` \| `Secret` | | Where the install script lives, in the credentials namespace. It must be on the admission policy's `scriptSources` allowlist ([ADR-0008](../adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)). |
 | `bootstrap.scriptRef.name` | string | | Object name (`InvalidName`). |
 | `bootstrap.scriptRef.key` | string | `install.sh` | `[A-Za-z0-9._-]`, not `.` or `..` (`InvalidKey`). |
 | `cordoned` | bool | `false` | Label the `Provider` cordoned (advisory today). |

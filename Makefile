@@ -5,7 +5,7 @@
 # and call these targets, and every target runs identically locally.
 
 .PHONY: all help fmt fmt-check lint test deny check crds crds-check calm-validate calm-diagrams \
-	ci-code-changed dco-check dco-check-test check-infra-identifiers check-infra-identifiers-test \
+	ci-code-changed dco-check dco-check-test check-infra-identifiers check-infra-identifiers-test vap-test \
 	docs docs-serve docs-clean
 
 CALM_CLI_VERSION  ?= 1.37.0
@@ -67,7 +67,7 @@ calm-diagrams: ## Render CALM Mermaid diagrams into docs/architecture/diagrams
 # filter cannot coexist with a required aggregator check (a workflow that never
 # triggers reports no context, so the PR blocks forever), so the filter lives
 # here and the `changes` job applies it per job. Keep in sync with build.yaml.
-CI_CODE_PATHS_RE ?= ^(crates/|deploy/crds/|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
+CI_CODE_PATHS_RE ?= ^(crates/|deploy/|scripts/vap-test\.sh$$|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
 
 ci-code-changed: ## Print true/false: does the diff against BASE_REF touch build-relevant paths?
 	@base="$${BASE_REF:-origin/main}"; \
@@ -88,6 +88,11 @@ check-infra-identifiers: ## Fail if a tracked file names real infrastructure (pl
 
 check-infra-identifiers-test: ## Test scripts/check-infra-identifiers.sh against throwaway repositories
 	@scripts/check-infra-identifiers-test.sh
+
+# ----- Admission policy (ADR-0008) -------------------------------------------
+
+vap-test: ## The bootstrap admission policy and controller RBAC against a real API server (kind)
+	@scripts/vap-test.sh
 
 # ----- Documentation (MkDocs Material) ---------------------------------------
 

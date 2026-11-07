@@ -77,8 +77,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "banlieue-api"
-version = "0.4.6"
-source = "git+https://github.com/firestoned/banlieue?rev=933f94d870d65c89c747c41f69c016b960bdadd0#933f94d870d65c89c747c41f69c016b960bdadd0"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "767e487e442de55b16f873313b65ecfff4f825270d5fb76054561540f36f317f"
 dependencies = [
  "k8s-openapi",
  "kube",

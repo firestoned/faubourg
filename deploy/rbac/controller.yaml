@@ -1,0 +1,90 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# Namespaces, identities and RBAC for the Host controller and its bootstrap Jobs
+# (ADR-0005, ADR-0006, ADR-0008 decision 6).
+#
+# The controller can create and delete Jobs in the credentials namespace and read Jobs and
+# Pods there (for the termination message that carries ScriptDrift). It has nothing on
+# Secrets, ConfigMaps, Pod subresources (exec, attach, port-forward) or the admission policy
+# objects, anywhere. What its Jobs may contain is decided by the admission policy, not by
+# this file. Access to banlieue Providers and Leases comes with the Provider work (roadmap 01).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faubourg-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faubourg-credentials
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: faubourg-controller
+  namespace: faubourg-system
+---
+# The bootstrap pods' identity. No Role binds it; its token is never mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: faubourg-bootstrap
+  namespace: faubourg-credentials
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: faubourg-controller
+rules:
+  - apiGroups: ["faubourg.firestoned.io"]
+    resources: ["hosts", "availabilityzones"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["faubourg.firestoned.io"]
+    resources: ["hosts/status", "availabilityzones/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: faubourg-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: faubourg-controller
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-controller
+    namespace: faubourg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faubourg-controller-bootstrap
+  namespace: faubourg-credentials
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faubourg-controller-bootstrap
+  namespace: faubourg-credentials
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faubourg-controller-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-controller
+    namespace: faubourg-system

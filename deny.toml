@@ -25,7 +25,6 @@ deny = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# banlieue-api arrives as a pinned git dependency with the Host controller (ADR-0002).
-allow-git = [
-  "https://github.com/firestoned/banlieue",
-]
+# crates.io only: banlieue-api is consumed from crates.io (ADR-0002 decision 4, amended), so
+# no git source is allowed.
+allow-git = []

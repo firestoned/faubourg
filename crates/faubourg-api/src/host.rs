@@ -117,7 +117,8 @@ pub struct BootstrapSpec {
     pub script_ref: Option<ScriptRef>,
 }
 
-/// A `ConfigMap` or `Secret` key, in the controller's namespace, holding the install script.
+/// A `ConfigMap` or `Secret` key, in the credentials namespace where the bootstrap Job runs
+/// (ADR-0005 decision 1), holding the install script.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptRef {
