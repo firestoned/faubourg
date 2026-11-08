@@ -863,12 +863,17 @@ mod tests {
     #[test]
     fn a_bootstrapped_host_gets_its_provider_applied() {
         let p = Fixture::new(host(1)).plan();
-        let s = p.apply_provider_spec.expect("the Provider's spec is applied");
+        let s = p
+            .apply_provider_spec
+            .expect("the Provider's spec is applied");
         assert_eq!(s["metadata"]["name"], "hv01");
         assert_eq!(s["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
         let l = p.apply_provider.expect("and its labels");
         assert!(l.get("spec").is_none());
-        assert_eq!(l["metadata"]["labels"]["faubourg.firestoned.io/host"], "hv01");
+        assert_eq!(
+            l["metadata"]["labels"]["faubourg.firestoned.io/host"],
+            "hv01"
+        );
     }
 
     #[test]
@@ -889,8 +894,14 @@ mod tests {
             .unwrap(),
         );
         f.own_provider = Some(legacy);
-        let s = f.plan().apply_provider_spec.expect("moved before the labels' apply");
-        assert_eq!(s["spec"]["connection"]["endpoint"], "ch://hv01.home.example");
+        let s = f
+            .plan()
+            .apply_provider_spec
+            .expect("moved before the labels' apply");
+        assert_eq!(
+            s["spec"]["connection"]["endpoint"],
+            "ch://hv01.home.example"
+        );
     }
 
     #[test]
@@ -901,7 +912,10 @@ mod tests {
         assert_eq!(p.create, None);
         assert_eq!(p.decision.phase, HostPhase::Pending);
         assert_eq!(p.decision.reason, REASON_AWAITING_IDENTITY);
-        assert!(p.apply_provider_spec.is_some(), "the Provider is created first");
+        assert!(
+            p.apply_provider_spec.is_some(),
+            "the Provider is created first"
+        );
         f.own_provider = Some(own(false));
         assert_eq!(f.plan().create, None);
         f.own_provider = Some(own(true));
@@ -932,7 +946,11 @@ mod tests {
             "never created for an adopted host"
         );
         f.own_provider = Some(own(true));
-        assert_eq!(f.plan().apply_provider_spec, None, "never an adopted Provider's spec");
+        assert_eq!(
+            f.plan().apply_provider_spec,
+            None,
+            "never an adopted Provider's spec"
+        );
         let b = f.plan().apply_provider.unwrap();
         assert!(b.get("spec").is_none());
         assert_eq!(
