@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # e2e-test.sh: a Host bootstrapped end to end in a throwaway kind cluster (ADR-0009 … ADR-0011),
-# with every faubourg piece real and only banlieue simulated:
+# with every faubourg piece real and only banlieue simulated. It installs what a release
+# installs (ADR-0012 decision 9):
 #
-#   - the bootstrap image, built here and pulled by digest from a local registry;
-#   - the admission policies and RBAC from deploy/;
-#   - the controller binary, outside the cluster, with its own ServiceAccount's token;
+#   - both images, built here and pulled by digest from a local registry;
+#   - the install file `make release-manifests` renders from deploy/ with those digests:
+#     CRDs, RBAC, admission policies and parameters, and the controller Deployment, which runs
+#     the controller in the cluster under its own ServiceAccount;
 #   - an OpenSSH "host" (test/sshd) as a pod behind a Service.
 #
 # banlieue's operator is simulated with kubectl: it creates the Provider's ServiceAccount and
@@ -40,9 +42,7 @@ done
 
 WORK="$(mktemp -d)"
 export KUBECONFIG="$WORK/admin.kubeconfig"
-CTL_PID=""
 cleanup() {
-  if [ -n "$CTL_PID" ]; then kill "$CTL_PID" 2>/dev/null || true; wait "$CTL_PID" 2>/dev/null || true; fi
   if [ "${E2E_KEEP:-}" != 1 ]; then
     kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
     "$CTR" rm -f "$REG" >/dev/null 2>&1 || true
@@ -54,9 +54,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "e2e-test: building the controller and the images"
-(cd "$ROOT" && cargo build -q -p faubourg-controller --bin faubourg-controller --example provider-crd)
-BIN="$ROOT/target/debug/faubourg-controller"
+(cd "$ROOT" && cargo build -q -p faubourg-controller --example provider-crd)
 "$CTR" build -q -f "$ROOT/images/bootstrap/Containerfile" -t localhost/faubourg-bootstrap:e2e "$ROOT" >/dev/null
+"$CTR" build -q -f "$ROOT/images/controller/Containerfile" -t localhost/faubourg-controller:e2e "$ROOT" >/dev/null
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/run"
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/placement"
 mkdir -p "$WORK/sshd-ctx"
@@ -93,16 +93,19 @@ push() { # local image, name -> prints name@digest as the cluster pulls it
 }
 IMAGE="$(push localhost/faubourg-bootstrap:e2e faubourg-bootstrap)"
 SSHD_IMAGE="$(push localhost/faubourg-test-sshd:e2e faubourg-test-sshd)"
+CONTROLLER_IMAGE="$(push localhost/faubourg-controller:e2e faubourg-controller)"
 echo "e2e-test: bootstrap image $IMAGE"
 
-kubectl apply -f "$ROOT/deploy/crds/" >/dev/null
+# banlieue, simulated: its namespace and its CRDs, from the pinned banlieue-api.
+kubectl create namespace "$BANLIEUE" >/dev/null
 "$ROOT/target/debug/examples/provider-crd" | kubectl apply -f - >/dev/null
 kubectl wait --for=condition=Established crd --all --timeout=60s >/dev/null
-kubectl create namespace "$BANLIEUE" >/dev/null
-kubectl apply -f "$ROOT/deploy/rbac/controller.yaml" >/dev/null
-kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-policy-params.yaml" \
-  | jq -c --arg img "$IMAGE" '.data.image = $img' | kubectl apply -f - >/dev/null
-kubectl apply -f "$ROOT/deploy/admission/bootstrap-policy.yaml" >/dev/null
+# faubourg, from the rendered install file, as a release ships it.
+(cd "$ROOT" && CONTROLLER_IMAGE="$CONTROLLER_IMAGE" BOOTSTRAP_IMAGE="$IMAGE" \
+  PROVIDER_API_SERVER=https://kubernetes.default.svc OUT="$WORK/faubourg.yaml" \
+  scripts/render-manifests.sh >/dev/null)
+kubectl apply -f "$WORK/faubourg.yaml" >/dev/null
+kubectl wait --for=condition=Established crd --all --timeout=60s >/dev/null
 kubectl apply -f - >/dev/null <<'EOF'
 {"apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass", "metadata": {"name": "cloud-hypervisor"},
  "spec": {"backend": "cloud-hypervisor", "deployment": "External"}}
@@ -152,18 +155,10 @@ echo "install ran for provider $provider"
 EOF
 kubectl -n "$CREDS" create configmap faubourg-install --from-file=install.sh="$WORK/install.sh" >/dev/null
 
-# The controller's own identity: a kubeconfig holding only its ServiceAccount token.
+# For checking the host's token from outside: the cluster's address and CA, no client cert.
 SERVER="$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')"
 kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
   | base64 -d >"$WORK/ca.crt"
-CTL_KUBECONFIG="$WORK/controller.kubeconfig"
-TOKEN="$(kubectl -n faubourg-system create token faubourg-controller --duration=1h)"
-KUBECONFIG="$CTL_KUBECONFIG" kubectl config set-cluster kind --server="$SERVER" \
-  --certificate-authority="$WORK/ca.crt" --embed-certs >/dev/null
-KUBECONFIG="$CTL_KUBECONFIG" kubectl config set-credentials controller --token="$TOKEN" >/dev/null
-KUBECONFIG="$CTL_KUBECONFIG" kubectl config set-context ctl --cluster=kind --user=controller >/dev/null
-KUBECONFIG="$CTL_KUBECONFIG" kubectl config use-context ctl >/dev/null
-unset TOKEN
 
 failures=0
 pass() { echo "ok   $1"; }
@@ -186,12 +181,18 @@ label_is() { # key value
   [ "$(kubectl -n "$BANLIEUE" get provider hv01 -o json | jq -r --arg k "$1" '.metadata.labels[$k] // ""')" = "$2" ]
 }
 
-echo "e2e-test: starting the controller"
-KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" \
-  FAUBOURG_DEFAULT_SCRIPT=ConfigMap/faubourg-install \
-  FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc RUST_LOG=info,kube=warn \
-  "$BIN" >"$WORK/controller.log" 2>&1 &
-CTL_PID=$!
+controller_log() { kubectl -n faubourg-system logs deploy/faubourg-controller >"$WORK/controller.log" 2>&1 || true; }
+
+echo "--- the controller, as the rendered Deployment (ADR-0012)"
+eventually "the controller Deployment is available" 180 kubectl -n faubourg-system wait \
+  --for=condition=Available deploy/faubourg-controller --timeout=5s
+if [ "$(kubectl -n faubourg-system get deploy faubourg-controller -o jsonpath='{.spec.template.spec.containers[0].image}')" = "$CONTROLLER_IMAGE" ]; then
+  pass "it runs the rendered controller digest"
+else fail "the controller image" "not the rendered digest"; fi
+if [ "$(kubectl -n faubourg-system get deploy faubourg-controller -o json | jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FAUBOURG_BOOTSTRAP_IMAGE").value')" = \
+     "$(kubectl -n faubourg-system get configmap faubourg-bootstrap-policy -o jsonpath='{.data.image}')" ]; then
+  pass "its bootstrap image is the policy's"
+else fail "the bootstrap image" "the controller and the policy disagree"; fi
 
 kubectl apply -f - >/dev/null <<EOF
 {"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "Host", "metadata": {"name": "hv01"},
@@ -238,6 +239,7 @@ if grep -qF "tokenFile: /etc/banlieue/credentials/token" <<<"$KCFG" && ! grep -q
    && grep -qF "server: https://kubernetes.default.svc" <<<"$KCFG"; then
   pass "the kubeconfig reads the token from a file and holds none"
 else fail "the kubeconfig" "$KCFG"; fi
+controller_log
 if grep -qF "$HOST_TOKEN" <<<"$JOB_LOG" || grep -qF "$HOST_TOKEN" "$WORK/controller.log"; then
   fail "the logs" "carry the provider token"
 else pass "neither the Job's nor the controller's log carries the token"; fi
@@ -268,6 +270,7 @@ eventually "its Job is garbage collected" 60 bash -c "! kubectl -n $CREDS get jo
 if kubectl -n "$BANLIEUE" get provider hv01 >/dev/null 2>&1; then pass "its Provider is kept (ADR-0011 decision 4)"
 else fail "the Provider" "was deleted"; fi
 
+controller_log
 if grep -qF 'not found in local store' "$WORK/controller.log"; then
   fail "the controller's watches" "$(grep -F 'not found in local store' "$WORK/controller.log" | head -2)"
 else pass "every watch event maps to a Host"; fi

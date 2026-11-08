@@ -137,6 +137,7 @@ nav:
   - Home: index.md
   - Concepts: concepts.md
   - Guides:
+      - Installing: guides/installing.md
       - Preparing a host: guides/preparing-a-host.md
       - SSH credentials: guides/ssh-credentials.md
       - Placing VMs in a zone: guides/zone-placement.md
@@ -160,6 +161,7 @@ nav:
       - "ADR-0009: The Host reconciler": adr/0009-host-reconciler.md
       - "ADR-0010: The bootstrap image": adr/0010-bootstrap-image.md
       - "ADR-0011: The host's Provider and its identity": adr/0011-the-hosts-provider-and-its-identity.md
+      - "ADR-0012: Images signed and published by digest": adr/0012-images-signed-and-published-by-digest.md
   - Security:
       - Threat model: security/threat-model.md
   - Development: development.md

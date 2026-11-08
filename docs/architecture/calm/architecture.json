@@ -114,6 +114,18 @@
       "node-type": "network",
       "name": "Host management network",
       "description": "The path from cluster nodes to each host's SSH port and from each host to the Kubernetes API. Exact topology is an open question (ADR-0005)."
+    },
+    {
+      "unique-id": "ecosystem-ghcr",
+      "node-type": "ecosystem",
+      "name": "GitHub Container Registry",
+      "description": "Holds faubourg-controller and faubourg-bootstrap, pushed only from main and releases, each Cosign-signed keyless by digest with build provenance and an SBOM (ADR-0012)."
+    },
+    {
+      "unique-id": "data-asset-install-file",
+      "node-type": "data-asset",
+      "name": "Install file (faubourg-<version>.yaml)",
+      "description": "deploy/ rendered with both image digests by make release-manifests, Cosign-signed, attached to each release. The bootstrap digest is written into the admission policy's parameters and the controller's environment by the same render (ADR-0012)."
     }
   ],
   "relationships": [
@@ -357,6 +369,33 @@
         }
       },
       "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-kube-pulls-images",
+      "description": "The kubelet pulls the controller and bootstrap images by digest; the admission policy admits only the bootstrap digest the operator applied (ADR-0008, ADR-0012).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "ecosystem-kube-api"
+          },
+          "destination": {
+            "node": "ecosystem-ghcr"
+          }
+        }
+      },
+      "protocol": "HTTPS"
+    },
+    {
+      "unique-id": "rel-operator-installs",
+      "description": "The operator verifies the install file's and the images' signatures, sets the API server address, and applies it (ADR-0012).",
+      "relationship-type": {
+        "interacts": {
+          "actor": "actor-platform-operator",
+          "nodes": [
+            "data-asset-install-file"
+          ]
+        }
+      }
     }
   ],
   "flows": [
@@ -421,6 +460,7 @@
     "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md",
     "docs/adr/0009-host-reconciler.md",
     "docs/adr/0010-bootstrap-image.md",
-    "docs/adr/0011-the-hosts-provider-and-its-identity.md"
+    "docs/adr/0011-the-hosts-provider-and-its-identity.md",
+    "docs/adr/0012-images-signed-and-published-by-digest.md"
   ]
 }
