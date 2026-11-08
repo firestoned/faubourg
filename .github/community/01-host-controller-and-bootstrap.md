@@ -18,10 +18,12 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] TOFU fingerprint reported by the Job and pinned in status by the controller; `revokeAfterBootstrap`
 - [x] ADR-0011: faubourg creates and labels the host's banlieue `Provider` (field manager `faubourg.firestoned.io/host-controller`), labels an adopted one, never deletes one; tested on kind (`make controller-test`)
 - [x] ADR-0012: both images built on every event, pushed, Cosign-signed, attested and Trivy-scanned from `main` and releases; a release ships one install file rendered with both digests and signed (`make release-manifests`); `make e2e-test` installs that file and runs the controller in the cluster
-- [ ] Cut the first release (v0.1.0) and verify it as `docs/guides/installing.md` says
+- [x] Cut the first release (v0.1.0) and verify it as `docs/guides/installing.md` says
+- [x] Live test, stage 1: install v0.1.0 on a real k0s cluster and adopt a live host (labels, health, cordon); found the missing run-account provisioning (ADR-0010 amended)
+- [ ] Live test, stage 2: bootstrap that host from faubourg (placement, account, token), on a release with the amendment
 - [ ] Leader election, before more than one replica
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
 - [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
 - [ ] Ask banlieue to publish the provider ServiceAccount name (status or `banlieue-api`), and drop faubourg's copy of its naming
 - [ ] A CA option for hosts that reach the API server through another certificate authority
-- [ ] Live test against one host; threat-model pass closes R-3
+- [ ] Threat-model pass after stage 2 closes R-3

@@ -59,6 +59,15 @@ Edit the install file before applying it:
 - In `faubourg-bootstrap-policy` (namespace `faubourg-system`): `scriptSources`, the script
   objects that may be mounted, and `apiAudiences`, your API server's token audiences. Leave
   `image` alone: it is the bootstrap digest the controller uses too.
+
+  The shipped `apiAudiences` is kubeadm's and kind's. k0s, for one, issues
+  `https://kubernetes.default.svc`. Read yours from a short-lived token; if it is wrong, every
+  provider token is refused:
+
+  ```sh
+  kubectl -n default create token default --duration=10m \
+    | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c .aud
+  ```
 - `banlieue-system`, `faubourg-credentials` and `faubourg-system`, if yours differ, in every
   place the file names them.
 

@@ -99,3 +99,20 @@ a shell and OpenSSH's libraries in the image.
   scoped run user never needs more than ADR-0005's one rule.
 - The image is built here (`images/bootstrap/Containerfile`); publishing and signing it is the
   next roadmap 01 item, and until then its digest is set by whoever builds it.
+
+*Amended 2026-11-08, after the first live test (roadmap 01):* decision 6 assumed the scoped run
+account already exists. On a fresh host it does not, so the check step's login is refused and,
+as written, the Job failed before placing anything. Placement now also provisions that account:
+
+- when the run credential's login is refused and a placement credential is mounted, the
+  refusal means "not in place", not an error; without a placement credential it is still an
+  error;
+- placement first creates the run account if it is missing (`useradd --system`, no password,
+  `*`), and writes the run credential's *public* key, derived from the mounted private key,
+  into its `~/.ssh/authorized_keys` (`0700` and `0600`, owned by the account), replacing any
+  line of the same key and keeping every other one. The account name and the key reach the
+  host on stdin, and the host checks both again;
+- a password run credential cannot be provisioned this way, and fails the Job (`PlaceAccount`)
+  without placing anything.
+
+`bootstrap-test` covers a host with no run account.

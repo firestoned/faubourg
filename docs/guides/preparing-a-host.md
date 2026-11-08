@@ -77,7 +77,10 @@ not the script maintainer's.
 
     Give the Host a **placement credential** (`ssh.placementSecretRef`): `root`, or an account
     with passwordless `sudo`. The Job uses it only when the host's copy of the script is
-    missing, differs from the source (sha256 compared), or is not `root:root 0755`. It writes
+    missing, differs from the source (sha256 compared), or is not `root:root 0755`, or when
+    the scoped account cannot log in yet. It creates the scoped account if it is missing (no
+    password) and authorizes the run key for it, so a fresh host needs nothing but the
+    placement account. The run credential must then be a key, not a password. It writes
     the script and the sudo rule through temporary files, checks the rule with `visudo -cf`,
     then checks the result again with the scoped account. With
     `ssh.revokeAfterBootstrap: true`, it then removes the placement key from that account's

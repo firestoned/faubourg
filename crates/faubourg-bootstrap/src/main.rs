@@ -86,6 +86,7 @@ async fn run() -> i32 {
         script_sha256: sha256_hex(&cfg.script),
         script: cfg.script.clone(),
         run_user: cfg.run.username.clone(),
+        run_public_key: public_key(&cfg.run),
         placement,
         run_stdin,
     };
@@ -151,6 +152,28 @@ fn placement_of(c: &faubourg_api::credentials::SshCredentials) -> Result<Placeme
         as_root: c.username == "root",
         revoke_blob: blob,
     })
+}
+
+/// A key credential's public half, `<type> <blob>`, for placement to authorize; `None` for a
+/// password or a key that cannot be read (which the run connection then reports).
+fn public_key(c: &faubourg_api::credentials::SshCredentials) -> Option<String> {
+    let Auth::Key {
+        private_key,
+        passphrase,
+        ..
+    } = &c.auth
+    else {
+        return None;
+    };
+    let text = std::str::from_utf8(private_key.expose()).ok()?;
+    let pass = match passphrase {
+        Some(p) => Some(std::str::from_utf8(p.expose()).ok()?),
+        None => None,
+    };
+    let key = russh::keys::decode_secret_key(text, pass).ok()?;
+    let line = key.public_key().to_openssh().ok()?;
+    let mut fields = line.split_whitespace();
+    Some(format!("{} {}", fields.next()?, fields.next()?))
 }
 
 fn report(fingerprint: Option<String>) {

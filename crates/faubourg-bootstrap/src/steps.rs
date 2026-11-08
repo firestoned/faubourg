@@ -42,6 +42,10 @@ pub trait Remote {
 
     /// True when an error was the host key being refused.
     fn refused(&self, e: &Self::Error) -> bool;
+
+    /// True when an error was the host refusing the credential: for the run credential on a
+    /// fresh host, the scoped account does not exist yet.
+    fn auth_refused(&self, e: &Self::Error) -> bool;
 }
 
 /// What the steps need beyond the remote.
@@ -51,8 +55,11 @@ pub struct Plan {
     pub script_sha256: String,
     /// The script itself.
     pub script: Vec<u8>,
-    /// The run credential's user, for the sudo rule.
+    /// The run credential's user, for the sudo rule and the account placement creates.
     pub run_user: String,
+    /// The run credential's public key (`<type> <blob>`), which placement authorizes for the
+    /// run account. `None` for a password run credential, which placement cannot provision.
+    pub run_public_key: Option<String>,
     /// The placement credential, when mounted.
     pub placement: Option<Placement>,
     /// The install script's standard input: the provider credential bundle (ADR-0011
@@ -85,6 +92,8 @@ pub enum Outcome {
 /// A step, for logs and [`Outcome::Failed`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
+    /// Creating the run account and authorizing its key.
+    PlaceAccount,
     /// Writing the script.
     PlaceScript,
     /// Writing the sudo rule.
@@ -104,12 +113,37 @@ pub async fn bootstrap<R: Remote>(r: &mut R, plan: &Plan) -> Result<Outcome, R::
 }
 
 async fn steps<R: Remote>(r: &mut R, plan: &Plan) -> Result<Outcome, R::Error> {
-    if !check(r, plan).await? {
+    // On a fresh host the run account does not exist yet, so its login is refused. Only
+    // placement can fix that; without a placement credential the refusal is the error.
+    let in_place = match check(r, plan).await {
+        Ok(v) => v,
+        Err(e) if r.auth_refused(&e) && plan.placement.is_some() => {
+            tracing::info!("the run account cannot log in yet; placement will create it");
+            false
+        }
+        Err(e) => return Err(e),
+    };
+    if !in_place {
         let Some(p) = &plan.placement else {
             tracing::warn!("the install script is not in place and no placement credential is set");
             return Ok(Outcome::ScriptDrift);
         };
-        tracing::info!("placing the install script and the sudo rule");
+        let Some(key) = &plan.run_public_key else {
+            tracing::warn!("a password run credential cannot be provisioned by placement");
+            return Ok(Outcome::Failed(Step::PlaceAccount, 0));
+        };
+        tracing::info!("placing the run account, the install script and the sudo rule");
+        let o = r
+            .exec(
+                Who::Placement,
+                &remote::place_account(p.as_root),
+                &remote::account_input(&plan.run_user, key),
+                false,
+            )
+            .await?;
+        if o.status != 0 {
+            return Ok(Outcome::Failed(Step::PlaceAccount, o.status));
+        }
         let o = r
             .exec(
                 Who::Placement,
@@ -172,6 +206,8 @@ mod tests {
         Refused,
         #[error("connection reset")]
         Reset,
+        #[error("the host refused the credential")]
+        AuthRefused,
     }
 
     /// Answers commands in order and records them.
@@ -215,6 +251,10 @@ mod tests {
         fn refused(&self, e: &FakeError) -> bool {
             matches!(e, FakeError::Refused)
         }
+
+        fn auth_refused(&self, e: &FakeError) -> bool {
+            matches!(e, FakeError::AuthRefused)
+        }
     }
 
     const SUM: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -240,6 +280,7 @@ mod tests {
             script_sha256: SUM.into(),
             script: b"#!/bin/sh\n".to_vec(),
             run_user: "faubourg".into(),
+            run_public_key: Some("ssh-ed25519 AAAArunkey".into()),
             placement,
             run_stdin: Vec::new(),
         }
@@ -289,35 +330,75 @@ mod tests {
     }
 
     #[test]
-    fn placement_writes_script_and_rule_checks_again_then_runs() {
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), in_place(), ok(0)]);
+    fn placement_writes_account_script_and_rule_checks_again_then_runs() {
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(0), in_place(), ok(0)]);
         let p = plan(placement(false, false));
         assert_eq!(run(bootstrap(&mut f, &p)).unwrap(), Outcome::Succeeded);
+        let account = remote::place_account(false);
         let script = remote::place_script(false);
         let sudoers = remote::place_sudoers(false);
         assert_eq!(
             f.commands(),
             vec![
                 (Who::Run, remote::CHECK),
+                (Who::Placement, account.as_str()),
                 (Who::Placement, script.as_str()),
                 (Who::Placement, sudoers.as_str()),
                 (Who::Run, remote::CHECK),
                 (Who::Run, remote::RUN),
             ]
         );
-        assert_eq!(f.calls[1].2, p.script, "the script goes on stdin");
-        assert_eq!(f.calls[2].2, remote::sudoers_rule("faubourg").into_bytes());
+        assert_eq!(
+            f.calls[1].2,
+            remote::account_input("faubourg", "ssh-ed25519 AAAArunkey"),
+            "the account and its public key go on stdin"
+        );
+        assert_eq!(f.calls[2].2, p.script, "the script goes on stdin");
+        assert_eq!(f.calls[3].2, remote::sudoers_rule("faubourg").into_bytes());
+    }
+
+    #[test]
+    fn a_fresh_host_whose_run_account_is_missing_is_placed() {
+        let mut f = Fake::new(vec![
+            Err(FakeError::AuthRefused),
+            ok(0),
+            ok(0),
+            ok(0),
+            in_place(),
+            ok(0),
+        ]);
+        let p = plan(placement(true, false));
+        assert_eq!(run(bootstrap(&mut f, &p)).unwrap(), Outcome::Succeeded);
+        assert_eq!(f.commands()[1].1, remote::place_account(true));
+    }
+
+    #[test]
+    fn a_refused_run_login_without_placement_is_an_error_not_drift() {
+        let mut f = Fake::new(vec![Err(FakeError::AuthRefused)]);
+        assert!(run(bootstrap(&mut f, &plan(None))).is_err());
+    }
+
+    #[test]
+    fn a_password_run_credential_cannot_be_provisioned() {
+        let mut f = Fake::new(vec![Err(FakeError::AuthRefused)]);
+        let mut p = plan(placement(true, false));
+        p.run_public_key = None;
+        assert_eq!(
+            run(bootstrap(&mut f, &p)).unwrap(),
+            Outcome::Failed(Step::PlaceAccount, 0)
+        );
+        assert_eq!(f.calls.len(), 1, "nothing is placed");
     }
 
     #[test]
     fn revoke_follows_a_successful_placement() {
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), in_place(), ok(0), ok(0)]);
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(0), in_place(), ok(0), ok(0)]);
         let p = plan(placement(true, true));
         assert_eq!(run(bootstrap(&mut f, &p)).unwrap(), Outcome::Succeeded);
         let revoke = remote::revoke();
-        assert_eq!(f.commands()[4], (Who::Placement, revoke.as_str()));
-        assert_eq!(f.calls[4].2, b"AAAAblob");
-        assert_eq!(f.commands()[5], (Who::Run, remote::RUN));
+        assert_eq!(f.commands()[5], (Who::Placement, revoke.as_str()));
+        assert_eq!(f.calls[5].2, b"AAAAblob");
+        assert_eq!(f.commands()[6], (Who::Run, remote::RUN));
     }
 
     #[test]
@@ -329,12 +410,17 @@ mod tests {
 
     #[test]
     fn a_failed_placement_stops_before_the_run() {
-        let mut f = Fake::new(vec![ok(1), ok(1)]);
+        let mut f = Fake::new(vec![ok(1), ok(4)]);
+        assert_eq!(
+            run(bootstrap(&mut f, &plan(placement(false, false)))).unwrap(),
+            Outcome::Failed(Step::PlaceAccount, 4)
+        );
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(1)]);
         assert_eq!(
             run(bootstrap(&mut f, &plan(placement(false, false)))).unwrap(),
             Outcome::Failed(Step::PlaceScript, 1)
         );
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(3)]);
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(3)]);
         assert_eq!(
             run(bootstrap(&mut f, &plan(placement(false, false)))).unwrap(),
             Outcome::Failed(Step::PlaceSudoers, 3)
@@ -344,17 +430,17 @@ mod tests {
 
     #[test]
     fn still_not_in_place_after_placement_is_drift() {
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(1)]);
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(0), ok(1)]);
         assert_eq!(
             run(bootstrap(&mut f, &plan(placement(false, true)))).unwrap(),
             Outcome::ScriptDrift
         );
-        assert_eq!(f.calls.len(), 4, "no revoke and no run");
+        assert_eq!(f.calls.len(), 5, "no revoke and no run");
     }
 
     #[test]
     fn a_failed_revoke_stops_before_the_run() {
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), in_place(), ok(2)]);
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(0), in_place(), ok(2)]);
         assert_eq!(
             run(bootstrap(&mut f, &plan(placement(true, true)))).unwrap(),
             Outcome::Failed(Step::Revoke, 2)
@@ -393,7 +479,7 @@ mod tests {
 
     #[test]
     fn the_credential_bundle_goes_to_the_script_and_nowhere_else() {
-        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), in_place(), ok(0)]);
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), ok(0), in_place(), ok(0)]);
         let mut p = plan(placement(true, false));
         p.run_stdin = b"faubourg-provider-credential v1\n".to_vec();
         run(bootstrap(&mut f, &p)).unwrap();
