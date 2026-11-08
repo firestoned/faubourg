@@ -22,7 +22,7 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] Live test, stage 1: install v0.1.0 on a real k0s cluster and adopt a live host (labels, health, cordon); found the missing run-account provisioning (ADR-0010 amended)
 - [x] Live test, stage 2: bootstrap that host from faubourg (placement, account, token), on v0.1.1; found that the example install script never installed the provider binary (`--provider-binary`, fixed)
 - [x] A Host switched from `Script` back to `None` keeps a valid Provider: the spec has its own field manager (ADR-0011 amended)
-- [ ] Leader election, before more than one replica
+- [x] Leader election: two replicas, one leader through the Lease `faubourg-controller`, taken by conditional writes, the leader stopping before its lease can lapse (ADR-0014); `controller-test` runs two controllers and checks the handover
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
 - [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
 - [ ] Ask banlieue to publish the provider ServiceAccount name (status or `banlieue-api`), and drop faubourg's copy of its naming

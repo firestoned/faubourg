@@ -242,6 +242,13 @@ expect_can yes "read the policy parameters (ADR-0013)" get configmaps/faubourg-b
 expect_can yes "watch the policy parameters" watch configmaps/faubourg-bootstrap-policy -n faubourg-system
 expect_can no "read another ConfigMap there" get configmaps/other -n faubourg-system
 expect_can no "list every ConfigMap there" list configmaps -n faubourg-system
+expect_can yes "renew the leader Lease (ADR-0014)" update leases.coordination.k8s.io/faubourg-controller -n faubourg-system
+expect_can yes "read the leader Lease" get leases.coordination.k8s.io/faubourg-controller -n faubourg-system
+expect_can yes "create the leader Lease" create leases.coordination.k8s.io -n faubourg-system
+expect_can no "write another Lease" update leases.coordination.k8s.io/kube-scheduler -n faubourg-system
+expect_can no "delete the leader Lease" delete leases.coordination.k8s.io/faubourg-controller -n faubourg-system
+expect_can no "create a Lease elsewhere" create leases.coordination.k8s.io -n kube-system
+expect_can no "take another controller's Lease" update leases.coordination.k8s.io/kube-controller-manager -n kube-system
 expect_can no "change the policy parameters" update configmaps/faubourg-bootstrap-policy -n faubourg-system
 expect_can no "change the policy" patch validatingadmissionpolicies.admissionregistration.k8s.io
 expect_can no "change the binding" delete validatingadmissionpolicybindings.admissionregistration.k8s.io

@@ -18,3 +18,4 @@
 | [0011](0011-the-hosts-provider-and-its-identity.md) | The host's Provider and its identity | Accepted |
 | [0012](0012-images-signed-and-published-by-digest.md) | Images are signed, published and deployed by digest | Accepted |
 | [0013](0013-script-content-pinned-and-rolled-out.md) | The install script's content is pinned by digest, and a change rolls out one host at a time | Accepted |
+| [0014](0014-controller-leader-election.md) | The controller elects a leader through a Lease | Accepted |

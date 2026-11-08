@@ -99,4 +99,5 @@ once, with no second person involved and no stop when the first host fails.
 - `--max-rebootstraps` is cluster-wide. A per-zone limit, or a percentage, is roadmap 02's to
   decide with zone health; until then a large fleet rolls out slowly by design.
 - With one replica (ADR-0009 decision 1) the count is exact. Leader election must keep it so:
-  only the leader creates Jobs.
+  only the leader creates Jobs. ADR-0014 does, and its leader stops before its lease can lapse,
+  so the count stays exact across a failover too.

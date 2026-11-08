@@ -1,8 +1,9 @@
 # Copyright (c) 2026 Erick Bourgeois, faubourg
 # SPDX-License-Identifier: Apache-2.0
 #
-# The Host controller (ADR-0009). One replica, Recreate: there is no leader election yet, and
-# every write it makes is idempotent, so a brief overlap during a rollout is safe.
+# The Host controller (ADR-0009). Two replicas, of which only the holder of the Lease
+# faubourg-controller acts; the other waits to take over (ADR-0014). A rolling update is safe:
+# a new pod only acts once the old leader has released the Lease or let it run out.
 #
 # Do not edit the image digests here: `make release-manifests` renders them, into this file and
 # into the admission policy's parameters at once (ADR-0012 decision 5), and a release ships the
@@ -19,9 +20,12 @@ metadata:
     app.kubernetes.io/component: host-controller
     app.kubernetes.io/managed-by: faubourg
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: faubourg-controller
@@ -33,6 +37,16 @@ spec:
     spec:
       serviceAccountName: faubourg-controller
       enableServiceLinks: false
+      # On different nodes where the cluster allows it, so one node's loss leaves a standby.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: faubourg-controller
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -43,6 +57,11 @@ spec:
         - name: controller
           image: ghcr.io/firestoned/faubourg-controller@sha256:<digest>
           env:
+            # This replica's identity in the leader election (ADR-0014).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: FAUBOURG_BOOTSTRAP_IMAGE
               value: ghcr.io/firestoned/faubourg-bootstrap@sha256:<digest>
             - name: FAUBOURG_CREDENTIALS_NAMESPACE

@@ -28,6 +28,7 @@ flowchart LR
     service-bootstrap-job["Bootstrap Job"]
     service-bootstrap-admission-policy["Bootstrap admission policy"]
     data-asset-bootstrap-policy-params["Bootstrap policy parameters (A-8)"]
+    data-asset-controller-lease["Controller leader Lease"]
     data-asset-host-az-crs["Host and AvailabilityZone CRs"]
     data-asset-ssh-secret["Host SSH Secret"]
     system-banlieue["banlieue"]
@@ -67,6 +68,7 @@ flowchart LR
     ecosystem-kube-api --> service-bootstrap-admission-policy
     service-bootstrap-admission-policy --> data-asset-bootstrap-policy-params
     service-host-controller --> data-asset-bootstrap-policy-params
+    service-host-controller --> data-asset-controller-lease
     service-zone-controller -->|HTTPS| ecosystem-kube-api
     service-bootstrap-job --> data-asset-ssh-secret
     service-bootstrap-job --> data-asset-install-script

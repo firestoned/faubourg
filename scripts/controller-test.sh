@@ -41,8 +41,9 @@ done
 WORK="$(mktemp -d)"
 export KUBECONFIG="$WORK/admin.kubeconfig"
 CTL_PID=""
+STANDBY_PID=""
 cleanup() {
-  if [ -n "$CTL_PID" ]; then kill "$CTL_PID" 2>/dev/null || true; wait "$CTL_PID" 2>/dev/null || true; fi
+  for pid in $CTL_PID $STANDBY_PID; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
   if [ -z "$SHARED" ] && [ "${CT_KEEP:-}" != 1 ]; then
     kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
   fi
@@ -101,7 +102,16 @@ pass() { echo "ok   $1"; }
 fail() { echo "FAIL $1: $2"; failures=$((failures + 1)); }
 
 echo "--- configuration fails closed"
-if KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE=registry.k8s.io/pause:3.10 \
+if KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" \
+  FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
+  "$BIN" >"$WORK/refused-identity.log" 2>&1; then
+  fail "no POD_NAME" "the controller started"
+elif grep -qF "POD_NAME" "$WORK/refused-identity.log"; then
+  pass "the controller refuses to start without an identity to elect with"
+else
+  fail "no POD_NAME" "refused for another reason: $(cat "$WORK/refused-identity.log")"
+fi
+if POD_NAME=ctl-refused KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE=registry.k8s.io/pause:3.10 \
   FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
   "$BIN" >"$WORK/refused.log" 2>&1; then
   fail "an image by tag" "the controller started"
@@ -111,12 +121,21 @@ else
   fail "an image by tag" "refused for another reason: $(cat "$WORK/refused.log")"
 fi
 
-echo "controller-test: starting the controller"
-KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" \
-  FAUBOURG_DEFAULT_SCRIPT=ConfigMap/faubourg-install RUST_LOG=info,kube=warn \
-  FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
-  "$BIN" >"$WORK/controller.log" 2>&1 &
+# Two replicas, as the Deployment runs them (ADR-0014): A starts first and must lead; B must
+# only wait, until A stops near the end.
+controller() { # identity, log
+  POD_NAME="$1" KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" \
+    FAUBOURG_DEFAULT_SCRIPT=ConfigMap/faubourg-install RUST_LOG=info,kube=warn \
+    FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
+    "$BIN" >"$2" 2>&1 &
+}
+LOGS=("$WORK/controller.log" "$WORK/standby.log")
+echo "controller-test: starting two controllers"
+controller ctl-a "$WORK/controller.log"
 CTL_PID=$!
+for _ in $(seq 1 30); do grep -qF 'starting the Host controller' "$WORK/controller.log" && break; sleep 1; done
+controller ctl-b "$WORK/standby.log"
+STANDBY_PID=$!
 
 # The admission binding takes a moment to take effect; the controller retries a refused Job.
 
@@ -161,6 +180,15 @@ kubectl apply -f - >/dev/null <<'EOF'
 {"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "AvailabilityZone",
  "metadata": {"name": "az1"}, "spec": {"storage": {"mode": "Local"}}}
 EOF
+
+holder() { kubectl -n faubourg-system get lease faubourg-controller -o jsonpath='{.spec.holderIdentity}'; }
+holder_is() { [ "$(holder)" = "$1" ]; }
+standby_acts() { grep -qE 'starting the Host controller|phase host=|created bootstrap Job' "$WORK/standby.log"; }
+
+echo "--- one leader (ADR-0014)"
+eventually "the first controller holds the Lease" 30 holder_is ctl-a
+eventually "the second waits to lead" 30 grep -qF 'waiting to lead' "$WORK/standby.log"
+never "and does nothing else" 5 standby_acts
 
 echo "--- a Host gets its Provider, then its Job (ADR-0011)"
 host hv01 az1 "$ADDR1" Script
@@ -339,27 +367,40 @@ eventually "the Job is garbage collected" 60 bash -c "! kubectl -n $CREDS get jo
 if kubectl -n "$BANLIEUE" get provider hv01 >/dev/null 2>&1; then pass "the Provider is kept"
 else fail "the Provider" "was deleted with its Host"; fi
 
+echo "--- the standby takes over (ADR-0014)"
+never "the standby never acted while the leader ran" 1 standby_acts
+kill -TERM "$CTL_PID"; wait "$CTL_PID" 2>/dev/null || true; CTL_PID=""
+if grep -qF 'released the leader Lease' "$WORK/controller.log"; then pass "a leader stopping releases the Lease"
+else fail "the stopping leader" "did not release: $(tail -3 "$WORK/controller.log")"; fi
+eventually "the standby takes over" 10 holder_is ctl-b
+eventually "and starts the controller" 10 grep -qF 'starting the Host controller' "$WORK/standby.log"
+host hv12 az1 hv12.home.example None
+eventually "the new leader reconciles" 30 phase_is hv12 Pending AwaitingProvider
+kubectl delete host hv12 >/dev/null
+
 echo "--- logs"
-if kill -0 "$CTL_PID" 2>/dev/null; then pass "the controller is still running"
-else fail "the controller" "exited: $(tail -5 "$WORK/controller.log")"; fi
-if grep -qE "$ADDR1|$ADDR1B|hv02\.home|hv03\.home" "$WORK/controller.log"; then
+if kill -0 "$STANDBY_PID" 2>/dev/null; then pass "the controller is still running"
+else fail "the controller" "exited: $(tail -5 "$WORK/standby.log")"; fi
+if grep -qE "$ADDR1|$ADDR1B|hv02\.home|hv03\.home" "${LOGS[@]}"; then
   fail "the logs" "carry a Host address"
 else
   pass "the logs carry no Host address"
 fi
-if grep -qF 'not found in local store' "$WORK/controller.log"; then
-  fail "the controller's watches" "$(grep -F 'not found in local store' "$WORK/controller.log" | head -2)"
+if grep -qF 'not found in local store' "${LOGS[@]}"; then
+  fail "the controller's watches" "$(grep -F 'not found in local store' "${LOGS[@]}" | head -2)"
 else pass "every watch event maps to a Host"; fi
 # An admission denial also reads "forbidden"; only an RBAC refusal counts here.
-if grep -i 'forbidden' "$WORK/controller.log" | grep -qv 'ValidatingAdmissionPolicy'; then
-  fail "RBAC" "$(grep -i 'forbidden' "$WORK/controller.log" | grep -v ValidatingAdmissionPolicy | head -3)"
+if grep -ih 'forbidden' "${LOGS[@]}" | grep -qv 'ValidatingAdmissionPolicy'; then
+  fail "RBAC" "$(grep -ih 'forbidden' "${LOGS[@]}" | grep -v ValidatingAdmissionPolicy | head -3)"
 else
   pass "the controller's RBAC was enough"
 fi
 
 if [ "$failures" -ne 0 ]; then
-  echo "--- controller log"
-  tail -40 "$WORK/controller.log"
+  echo "--- controller logs"
+  tail -30 "$WORK/controller.log"
+  echo "--- standby"
+  tail -15 "$WORK/standby.log"
   echo "controller-test: $failures failure(s)"
   exit 1
 fi
