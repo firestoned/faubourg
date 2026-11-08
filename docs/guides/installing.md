@@ -4,8 +4,9 @@
 # Installing faubourg
 
 !!! warning "Pre-1.0"
-    faubourg has not been run against a real hypervisor yet (accepted risk R-3 in the
-    [threat model](../security/threat-model.md)). Do not install it on a fleet you depend on.
+    faubourg has been run against one live Cloud Hypervisor host, adopted and then bootstrapped,
+    and its API may still change. Read the accepted risks in the
+    [threat model](../security/threat-model.md) before installing it on a fleet you depend on.
 
 A release ships one install file, `faubourg-<version>.yaml`, and its Cosign signature bundle
 ([ADR-0012](../adr/0012-images-signed-and-published-by-digest.md)). The file holds the CRDs,

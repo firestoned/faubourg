@@ -32,16 +32,17 @@ no object for ([ADR-0002](adr/0002-banlieue-provider-is-the-host-agent.md)):
 
 ## Status
 
-faubourg is pre-1.0. The architecture (ADR-0001 to ADR-0007) is accepted, and the API crate
-(the CRD types, their fail-closed validation and the SSH Secret contract) is implemented and
-tested. The controllers come next.
+faubourg is pre-1.0. The architecture (ADR-0001 to ADR-0012) is accepted. The API crate, the
+Host controller, the bootstrap image, the admission policy and the signed release are
+implemented and tested; the zone controller comes next
+([roadmap 02](https://github.com/firestoned/faubourg/blob/main/.github/community/02-zone-health-and-cordon.md)).
 
-!!! warning "Do not deploy yet"
+!!! warning "Pre-1.0"
 
-    The host controller and the bootstrap Job are being built
-    ([roadmap 01](https://github.com/firestoned/faubourg/blob/main/.github/community/01-host-controller-and-bootstrap.md)).
-    Until they land and their threat-model pass closes accepted risk R-3, several controls
-    in the [threat model](security/threat-model.md) are still planned, not built.
+    The host controller and the bootstrap Job are released and have run against one live
+    host ([roadmap 01](https://github.com/firestoned/faubourg/blob/main/.github/community/01-host-controller-and-bootstrap.md)).
+    Every control in the [threat model](security/threat-model.md) exists; read its accepted
+    risks before deploying, and expect the API to change before 1.0.
 
 The status board is
 [`ROADMAPS.md`](https://github.com/firestoned/faubourg/blob/main/ROADMAPS.md).
