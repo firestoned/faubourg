@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod crd;
 pub mod credentials;
 pub mod host;
+pub mod policy;
 pub mod validation;
 pub mod zone;
 

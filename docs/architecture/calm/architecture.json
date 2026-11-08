@@ -23,7 +23,7 @@
       "unique-id": "service-host-controller",
       "node-type": "service",
       "name": "Host controller",
-      "description": "The faubourg-controller Deployment in faubourg-system, one replica (ADR-0009). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change, derives the phase from the Job and the Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets or ConfigMaps, never mints a token."
+      "description": "The faubourg-controller Deployment in faubourg-system, one replica (ADR-0009). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token."
     },
     {
       "unique-id": "service-zone-controller",
@@ -35,13 +35,19 @@
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job",
-      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It refuses a mounted script whose sha256 is not the pinned FAUBOURG_SCRIPT_SHA256 before opening any connection (exit 66, ScriptUnpinned, ADR-0013), verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
       "node-type": "service",
       "name": "Bootstrap admission policy",
-      "description": "A ValidatingAdmissionPolicy and binding on the credentials namespace, evaluated by the Kubernetes API server. Every Job there must run the digest-pinned bootstrap image with no command, literal env, read-only credential and allowlisted script volumes and the restricted security profile; only the Job controller may create Pods there. Parameters live in a ConfigMap in faubourg-system that neither the controller nor a script maintainer can write (ADR-0008)."
+      "description": "A ValidatingAdmissionPolicy and binding on the credentials namespace, evaluated by the Kubernetes API server. Every Job there must run the digest-pinned bootstrap image with no command, literal env, read-only credential volumes and a script volume whose source, key and FAUBOURG_SCRIPT_SHA256 match a pinned entry and the restricted security profile; only the Job controller may create Pods there. Parameters live in a ConfigMap in faubourg-system that neither the controller nor a script maintainer can write (ADR-0008, ADR-0013)."
+    },
+    {
+      "unique-id": "data-asset-bootstrap-policy-params",
+      "node-type": "data-asset",
+      "name": "Bootstrap policy parameters (A-8)",
+      "description": "The ConfigMap faubourg-bootstrap-policy in faubourg-system, written by the platform administrator: the bootstrap image's digest, and each allowed script source with its key and the sha256 of its content (ConfigMap/<name>/<key>@sha256:<hex>). The admission policy evaluates every Job against it; the Host controller reads it, and nothing else of its kind, to learn each script's pinned digest. A script maintainer cannot pin their own change (ADR-0008, ADR-0013)."
     },
     {
       "unique-id": "data-asset-host-az-crs",
@@ -83,7 +89,7 @@
       "unique-id": "data-asset-install-script",
       "node-type": "data-asset",
       "name": "Install script source",
-      "description": "ConfigMap or Secret holding install.sh, in the credentials namespace and on the admission policy's scriptSources allowlist. The default downloads a pinned banlieue binary, verifies its sha256 and runs banlieue host cloud-hypervisor install (ADR-0005, ADR-0008)."
+      "description": "ConfigMap or Secret holding install.sh, in the credentials namespace and on the admission policy's scriptSources allowlist with the sha256 of its content; an edit runs nowhere until the platform administrator pins it. The default downloads a pinned banlieue binary, verifies its sha256 and runs banlieue host cloud-hypervisor install (ADR-0005, ADR-0008, ADR-0013)."
     },
     {
       "unique-id": "data-asset-host-install-script",
@@ -240,6 +246,34 @@
       }
     },
     {
+      "unique-id": "rel-admission-policy-params",
+      "description": "The admission policy evaluates every Job with the parameters: the pinned image, and the pinned script source, key and digest (ADR-0008, ADR-0013).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-bootstrap-admission-policy"
+          },
+          "destination": {
+            "node": "data-asset-bootstrap-policy-params"
+          }
+        }
+      }
+    },
+    {
+      "unique-id": "rel-host-controller-policy-params",
+      "description": "The Host controller gets, lists and watches this one ConfigMap by name, read-only, to resolve each Host's script to its pinned digest (ADR-0013).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-host-controller"
+          },
+          "destination": {
+            "node": "data-asset-bootstrap-policy-params"
+          }
+        }
+      }
+    },
+    {
       "unique-id": "rel-zone-controller-kube",
       "description": "Watches AvailabilityZone and Host; writes AvailabilityZone status.",
       "relationship-type": {
@@ -270,7 +304,7 @@
     },
     {
       "unique-id": "rel-job-script-source",
-      "description": "The Job mounts the script source and compares its sha256 with the on-host script.",
+      "description": "The Job mounts the script source, refuses it unless its sha256 is the pinned digest, and compares it with the on-host script.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -461,6 +495,7 @@
     "docs/adr/0009-host-reconciler.md",
     "docs/adr/0010-bootstrap-image.md",
     "docs/adr/0011-the-hosts-provider-and-its-identity.md",
-    "docs/adr/0012-images-signed-and-published-by-digest.md"
+    "docs/adr/0012-images-signed-and-published-by-digest.md",
+    "docs/adr/0013-script-content-pinned-and-rolled-out.md"
   ]
 }

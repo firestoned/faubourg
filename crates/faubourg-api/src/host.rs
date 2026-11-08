@@ -124,7 +124,7 @@ pub struct BootstrapSpec {
 
 /// A `ConfigMap` or `Secret` key, in the credentials namespace where the bootstrap Job runs
 /// (ADR-0005 decision 1), holding the install script.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptRef {
     /// `ConfigMap` or `Secret`.
@@ -284,7 +284,7 @@ fn is_address(s: &str) -> bool {
 }
 
 /// A `ConfigMap` or `Secret` data key: `[A-Za-z0-9._-]`, at most 253, not `.` or `..`.
-fn is_config_key(s: &str) -> bool {
+pub(crate) fn is_config_key(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 253
         && s != "."

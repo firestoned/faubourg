@@ -3,15 +3,16 @@
 
 //! `faubourg-bootstrap`: the program in the bootstrap image (ADR-0010).
 //!
-//! Exit codes: 0 success, 64 `ScriptDrift`, 65 host key refused, 1 anything else. On success
+//! Exit codes: 0 success, 64 `ScriptDrift`, 65 host key refused, 66 the mounted script is not
+//! the pinned one, 1 anything else. On success
 //! and on drift, the accepted host key's fingerprint is written to the termination message.
 
 use std::path::Path;
 use std::process::ExitCode;
 
-use faubourg_api::bootstrap::{EXIT_FAILED, Report};
+use faubourg_api::bootstrap::{EXIT_FAILED, EXIT_SCRIPT_UNPINNED, Report};
 use faubourg_api::credentials::Auth;
-use faubourg_bootstrap::config::Config;
+use faubourg_bootstrap::config::{Config, ConfigError};
 use faubourg_bootstrap::hostkey::Verifier;
 use faubourg_bootstrap::ssh::Ssh;
 use faubourg_bootstrap::steps::{self, Outcome, Placement, Plan};
@@ -35,6 +36,11 @@ async fn main() -> ExitCode {
 async fn run() -> i32 {
     let cfg = match Config::load(&|k| std::env::var(k).ok(), Path::new("/")) {
         Ok(c) => c,
+        // Before any connection, to the API server or to the host (ADR-0013 decision 4).
+        Err(e @ ConfigError::ScriptUnpinned) => {
+            error!(error = %e, "refusing to start");
+            return EXIT_SCRIPT_UNPINNED;
+        }
         Err(e) => {
             error!(error = %e, "refusing to start");
             return EXIT_FAILED;
