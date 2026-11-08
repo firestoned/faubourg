@@ -119,9 +119,11 @@ if [ ! -x "$DEST" ] || [ "$(cat "$MARK" 2>/dev/null)" != "$BANLIEUE_SHA256" ]; t
 fi
 ln -sfn "$DEST" "${DEST_DIR}/banlieue"
 
-# banlieue's installer is idempotent by stage; preflight and selftest change nothing. With a
-# bundle, the Provider is named, and the installer runs again once the credential is in
-# place, so it enables the provider it could not enable without one.
+# banlieue's installer is idempotent by stage; preflight and selftest change nothing. Its
+# provider unit runs /usr/local/bin/banlieue, which it writes only from --provider-binary
+# (and leaves alone when the bytes already match). With a bundle, the Provider is named, and
+# the installer runs again once the credential is in place, so it enables the provider it
+# could not enable without one.
 if [ -n "$PROVIDER_NAME" ]; then
     BANLIEUE_HOST_PROVIDER_NAME="$PROVIDER_NAME"
     BANLIEUE_HOST_PROVIDER_NAMESPACE="$PROVIDER_NAMESPACE"
@@ -129,12 +131,12 @@ if [ -n "$PROVIDER_NAME" ]; then
 fi
 "${DEST_DIR}/banlieue" host cloud-hypervisor preflight
 # shellcheck disable=SC2086 # INSTALL_FLAGS is word-split on purpose; root owns its value
-"${DEST_DIR}/banlieue" host cloud-hypervisor install $INSTALL_FLAGS
+"${DEST_DIR}/banlieue" host cloud-hypervisor install --provider-binary "$DEST" $INSTALL_FLAGS
 if [ -n "$TOKEN" ]; then
     write_credential "${CRED_DIR}/token" "$TOKEN"
     write_credential "${CRED_DIR}/kubeconfig" "$KUBECONFIG_TEXT
 "
     # shellcheck disable=SC2086
-    "${DEST_DIR}/banlieue" host cloud-hypervisor install $INSTALL_FLAGS
+    "${DEST_DIR}/banlieue" host cloud-hypervisor install --provider-binary "$DEST" $INSTALL_FLAGS
 fi
 "${DEST_DIR}/banlieue" host cloud-hypervisor selftest
