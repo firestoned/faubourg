@@ -38,11 +38,14 @@ sudo rule would make it root.
 [`examples/host/install.sh`](https://github.com/firestoned/faubourg/blob/main/examples/host/install.sh):
 
 1. refuses any argument and any non-root caller, and sets a fixed `PATH`;
-2. downloads a pinned `banlieue` binary with `curl --proto '=https' --tlsv1.2`, from any
-   repository, including an internal mirror in an air-gapped site;
-3. checks its sha256 against the value pinned in the script, and refuses on a mismatch;
-4. runs `banlieue host cloud-hypervisor install`, banlieue's staged and idempotent host
-   installer (see the [banlieue docs](https://firestoned.github.io/banlieue/)).
+2. downloads a pinned `banlieue` binary, or banlieue's release tarball, with
+   `curl --proto '=https' --tlsv1.2`, from any repository, including an internal mirror in an
+   air-gapped site;
+3. checks its sha256 against the value pinned in the script before unpacking anything, refuses
+   on a mismatch, and installs the binary owned by root;
+4. runs `banlieue host cloud-hypervisor install` with that binary as `--provider-binary`:
+   banlieue's staged and idempotent host installer, which writes only what differs (see the
+   [banlieue docs](https://firestoned.github.io/banlieue/)).
 
 Edit the settings block at the top: `BANLIEUE_VERSION`, `BANLIEUE_URL`, `BANLIEUE_SHA256`,
 optionally `CA_BUNDLE` for an internal CA, and `INSTALL_FLAGS` for the installer.
@@ -126,6 +129,28 @@ the Host waits (`ProviderMissing`).
 
 Exactly one Provider may carry the host's label. With two, the Host reports
 `ProviderAmbiguous` and is never `Ready`.
+
+## Bootstrapping a host that already runs banlieue
+
+Switching an adopted Host to `bootstrap.method: Script` re-runs banlieue's installer on a host
+that has its own settings. The script is shared by every host, so its `INSTALL_FLAGS` must
+reproduce that host's: a VMM build other than the release's, or a guest budget
+(`--guest-memory-max` and the like). With flags that do not fit, the installer repoints the VMM
+and rewrites the guest slice (accepted risk R-13 in the
+[threat model](../security/threat-model.md)).
+
+See what it would change first, on the host, with the binary it already runs and your flags:
+
+```sh
+sudo env BANLIEUE_HOST_PROVIDER_NAME=hv01 BANLIEUE_HOST_PROVIDER_NAMESPACE=banlieue-system \
+  /usr/local/bin/banlieue host cloud-hypervisor install --dry-run \
+  --provider-binary /usr/local/bin/banlieue <INSTALL_FLAGS>
+```
+
+Every `would write` and `would link` line is a change. Adjust `INSTALL_FLAGS` until the only
+ones left are those you want. Point the Host's `address` at the host's own sshd and pin its key
+in `knownHosts`: an SSH front end on another address, such as a mesh VPN's, presents a
+different key and is refused.
 
 ## The host's Provider and its credential
 

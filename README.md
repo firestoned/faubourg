@@ -60,19 +60,20 @@ More in [`examples/`](examples/) and the [concepts page](docs/concepts.md).
 
 ## Status
 
-Pre-1.0. **Do not deploy yet**: the controls that live in the controller and the bootstrap
-Job are still planned (accepted risk R-3 in the [threat model](docs/security/threat-model.md)).
+Pre-1.0. Released (v0.1.1) and run against one live Cloud Hypervisor host, adopted and then
+bootstrapped from nothing. Every control in the [threat model](docs/security/threat-model.md)
+exists; read its accepted risks before deploying, and expect the API to change before 1.0.
 
 | Area | State |
 | --- | --- |
 | Architecture: [ADR-0001 … ADR-0012](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
-| [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); no published image yet |
+| [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); released |
 | [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
-| [Bootstrap image](images/bootstrap/) ([ADR-0010](docs/adr/0010-bootstrap-image.md)) | implemented, tested against a real OpenSSH host (`make bootstrap-test`); not published yet |
+| [Bootstrap image](images/bootstrap/) ([ADR-0010](docs/adr/0010-bootstrap-image.md)) | implemented, tested against a real OpenSSH host (`make bootstrap-test`); released |
 | [Provider creation and the provider's credential](docs/adr/0011-the-hosts-provider-and-its-identity.md) | implemented, tested end to end on kind with the real image (`make e2e-test`) |
-| [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented in CI; no release cut yet |
-| A run against a real hypervisor | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
+| [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented; v0.1.0 and v0.1.1 released and verified |
+| A run against a real hypervisor | done: one host adopted, then bootstrapped from nothing ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller and cordon | not started ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
