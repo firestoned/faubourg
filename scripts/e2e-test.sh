@@ -14,7 +14,8 @@
 # reports the Provider's identity and health. The host's install script is a test script that
 # reads the credential bundle and installs it where banlieue's provider would read it.
 #
-# Needs: kind, kubectl, jq, podman, ssh-keygen, cargo. Set KIND_EXPERIMENTAL_PROVIDER=podman.
+# Needs: kind, kubectl, jq, ssh-keygen, cargo, and docker or podman: the one kind uses
+# (podman when KIND_EXPERIMENTAL_PROVIDER=podman, else docker), for the images and registry.
 #
 #   E2E_CLUSTER   kind cluster name (default faubourg-e2e); deleted on exit
 #   E2E_KEEP=1    keep the cluster and registry afterwards
@@ -31,7 +32,9 @@ BANLIEUE=banlieue-system
 SA=banlieue-provider-cloud-hypervisor-hv01
 HOST_ADDR=hv01.hosts.svc.cluster.local
 
-for tool in kind kubectl jq podman ssh-keygen cargo; do
+# The registry must join kind's network, so it runs on the engine kind runs on.
+if [ "${KIND_EXPERIMENTAL_PROVIDER:-}" = podman ]; then CTR=podman; else CTR=docker; fi
+for tool in kind kubectl jq "$CTR" ssh-keygen cargo; do
   command -v "$tool" >/dev/null 2>&1 || { echo "e2e-test: $tool not found" >&2; exit 1; }
 done
 
@@ -42,7 +45,7 @@ cleanup() {
   if [ -n "$CTL_PID" ]; then kill "$CTL_PID" 2>/dev/null || true; wait "$CTL_PID" 2>/dev/null || true; fi
   if [ "${E2E_KEEP:-}" != 1 ]; then
     kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-    podman rm -f "$REG" >/dev/null 2>&1 || true
+    "$CTR" rm -f "$REG" >/dev/null 2>&1 || true
     rm -rf "$WORK"
   else
     echo "e2e-test: kept cluster $CLUSTER, registry $REG and $WORK"
@@ -53,12 +56,12 @@ trap cleanup EXIT
 echo "e2e-test: building the controller and the images"
 (cd "$ROOT" && cargo build -q -p faubourg-controller --bin faubourg-controller --example provider-crd)
 BIN="$ROOT/target/debug/faubourg-controller"
-podman build -q -f "$ROOT/images/bootstrap/Containerfile" -t localhost/faubourg-bootstrap:e2e "$ROOT" >/dev/null
+"$CTR" build -q -f "$ROOT/images/bootstrap/Containerfile" -t localhost/faubourg-bootstrap:e2e "$ROOT" >/dev/null
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/run"
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/placement"
 mkdir -p "$WORK/sshd-ctx"
 cp "$WORK/run.pub" "$WORK/placement.pub" "$ROOT/test/sshd/Containerfile" "$WORK/sshd-ctx/"
-podman build -q -t localhost/faubourg-test-sshd:e2e "$WORK/sshd-ctx" >/dev/null
+"$CTR" build -q -f "$WORK/sshd-ctx/Containerfile" -t localhost/faubourg-test-sshd:e2e "$WORK/sshd-ctx" >/dev/null
 
 echo "e2e-test: creating kind cluster $CLUSTER with a local registry"
 cat >"$WORK/kind.yaml" <<'EOF'
@@ -70,16 +73,23 @@ containerdConfigPatches:
       config_path = "/etc/containerd/certs.d"
 EOF
 kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --config "$WORK/kind.yaml" --wait 180s >/dev/null
-podman rm -f "$REG" >/dev/null 2>&1 || true
-podman run -d --name "$REG" --network kind -p "127.0.0.1:${REG_PORT}:5000" docker.io/library/registry:2 >/dev/null
+"$CTR" rm -f "$REG" >/dev/null 2>&1 || true
+"$CTR" run -d --name "$REG" --network kind -p "127.0.0.1:${REG_PORT}:5000" docker.io/library/registry:2 >/dev/null
 for node in $(kind get nodes --name "$CLUSTER"); do
-  podman exec "$node" sh -c "mkdir -p /etc/containerd/certs.d/localhost:${REG_PORT} && \
+  "$CTR" exec "$node" sh -c "mkdir -p /etc/containerd/certs.d/localhost:${REG_PORT} && \
     printf '[host.\"http://${REG}:5000\"]\n' > /etc/containerd/certs.d/localhost:${REG_PORT}/hosts.toml"
 done
 push() { # local image, name -> prints name@digest as the cluster pulls it
   local ref="localhost:${REG_PORT}/$2:e2e"
-  podman push -q --tls-verify=false --digestfile "$WORK/$2.digest" "$1" "$ref" >/dev/null
-  echo "localhost:${REG_PORT}/$2@$(cat "$WORK/$2.digest")"
+  if [ "$CTR" = podman ]; then
+    podman push -q --tls-verify=false --digestfile "$WORK/$2.digest" "$1" "$ref" >/dev/null
+    echo "localhost:${REG_PORT}/$2@$(cat "$WORK/$2.digest")"
+  else
+    # docker pushes plain HTTP to localhost and records the digest on the image.
+    docker tag "$1" "$ref" && docker push -q "$ref" >/dev/null
+    docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+      | grep -m1 "^localhost:${REG_PORT}/$2@sha256:"
+  fi
 }
 IMAGE="$(push localhost/faubourg-bootstrap:e2e faubourg-bootstrap)"
 SSHD_IMAGE="$(push localhost/faubourg-test-sshd:e2e faubourg-test-sshd)"

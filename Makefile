@@ -67,7 +67,7 @@ calm-diagrams: ## Render CALM Mermaid diagrams into docs/architecture/diagrams
 # filter cannot coexist with a required aggregator check (a workflow that never
 # triggers reports no context, so the PR blocks forever), so the filter lives
 # here and the `changes` job applies it per job. Keep in sync with build.yaml.
-CI_CODE_PATHS_RE ?= ^(crates/|deploy/|scripts/vap-test\.sh$$|scripts/controller-test\.sh$$|scripts/bootstrap-test\.sh$$|scripts/e2e-test\.sh$$|examples/host/|images/|test/sshd/|\.containerignore$$|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
+CI_CODE_PATHS_RE ?= ^(crates/|deploy/|scripts/vap-test\.sh$$|scripts/controller-test\.sh$$|scripts/bootstrap-test\.sh$$|scripts/e2e-test\.sh$$|examples/host/|images/|test/sshd/|\.containerignore$$|\.dockerignore$$|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
 
 ci-code-changed: ## Print true/false: does the diff against BASE_REF touch build-relevant paths?
 	@base="$${BASE_REF:-origin/main}"; \

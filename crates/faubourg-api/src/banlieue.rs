@@ -77,7 +77,7 @@ mod tests {
     fn every_name_starts_with_the_class_prefix() {
         for (class, provider, _) in BANLIEUE {
             let name = provider_service_account(class, provider);
-            assert!(name.starts_with(&service_account_prefix(class)), "{name}");
+            assert!(name.starts_with(&service_account_prefix(class)), "{class} {provider}");
             assert!(name.len() <= 63);
         }
     }
