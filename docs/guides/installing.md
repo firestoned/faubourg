@@ -93,6 +93,31 @@ Then create the install script's ConfigMap and the hosts' Secrets in `faubourg-c
 ([SSH credentials](ssh-credentials.md), [Preparing a host](preparing-a-host.md)), an
 `AvailabilityZone`, and your Hosts.
 
+## Upgrading
+
+Verify the new release as in step 1, set the same values as in step 2 (your `scriptSources` pins
+stay as they are), and apply it. From v0.1.4 on, the controller runs two replicas and only the
+holder of the Lease `faubourg-controller` acts
+([ADR-0014](../adr/0014-controller-leader-election.md)), so a rolling update replaces one pod at
+a time and a new pod waits for the Lease.
+
+!!! warning "Upgrading from a release before v0.1.4"
+
+    The running controller does not elect, so a new pod would take the Lease and act alongside
+    it until the old pod is gone. Stop it first, so nothing overlaps:
+
+    ```sh
+    kubectl -n faubourg-system scale deploy/faubourg-controller --replicas=0
+    kubectl -n faubourg-system wait --for=delete pod -l app.kubernetes.io/name=faubourg-controller
+    kubectl apply -f "faubourg-$VERSION.yaml"
+    ```
+
+    The controller is down for those seconds; nothing on the hosts depends on it.
+
+Upgrading to a release with [ADR-0013](../adr/0013-script-content-pinned-and-rolled-out.md)
+(v0.1.2) changes every Host's bootstrap inputs once, so each bootstrapped host re-runs its install
+once, one at a time ([Changing the script](preparing-a-host.md#changing-the-script)).
+
 ## Building it yourself
 
 `make controller-image bootstrap-image` builds both images with podman. Push them, then render
