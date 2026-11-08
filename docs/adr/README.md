@@ -15,4 +15,4 @@
 | [0008](0008-bootstrap-jobs-constrained-by-admission-policy.md) | Bootstrap Jobs are constrained by a ValidatingAdmissionPolicy | Accepted |
 | [0009](0009-host-reconciler.md) | The Host reconciler | Accepted |
 | [0010](0010-bootstrap-image.md) | The bootstrap image | Accepted |
-| [0011](0011-the-hosts-provider-and-its-identity.md) | The host's Provider and its identity | Proposed |
+| [0011](0011-the-hosts-provider-and-its-identity.md) | The host's Provider and its identity | Accepted |

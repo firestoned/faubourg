@@ -3,7 +3,7 @@
 
 # ADR-0011: The host's Provider and its identity
 
-**Status:** Proposed · **Date:** 2026-11-07
+**Status:** Accepted · **Date:** 2026-11-07
 
 ## Context
 
