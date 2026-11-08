@@ -65,8 +65,7 @@ Job are still planned (accepted risk R-3 in the [threat model](docs/security/thr
 
 | Area | State |
 | --- | --- |
-| Architecture: [ADR-0001 … ADR-0011](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
-| [ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md): images signed and published by digest | proposed |
+| Architecture: [ADR-0001 … ADR-0012](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
 | [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); no published image yet |
 | [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
