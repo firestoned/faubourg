@@ -5,16 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0010** (ADR-0001 … ADR-0009 Accepted, ADR-0010 Proposed;
-> ADR-0002, ADR-0005 and ADR-0007 amended). Fifth pass: the shipped code is
+> defined by **ADR-0001 … ADR-0011** (all Accepted;
+> ADR-0002, ADR-0005, ADR-0007, ADR-0008 and ADR-0009 amended). Sixth pass: the shipped code is
 > `crates/faubourg-api` (types, validation, the SSH Secret contract, the Job-to-image
 > contract), `crates/faubourg-controller` (the Host reconciler and its binary) and
 > `crates/faubourg-bootstrap` (the bootstrap image's binary, on russh), with the admission
 > policy, the RBAC and the controller Deployment in `deploy/` and the image in
 > `images/bootstrap/`. The policy (`make vap-test`), the controller with its own RBAC
 > (`make controller-test`) and the image against a real OpenSSH host (`make bootstrap-test`)
-> are tested in CI. No image is published yet, faubourg does not create Providers yet, and
-> nothing has run against a real hypervisor. Every control below that lives in a planned
+> are tested in CI, and a Host is bootstrapped end to end on kind with the real image, its
+> Provider created and its first provider token minted and delivered (`make e2e-test`; banlieue
+> simulated). No image is published yet, and nothing has run against a real hypervisor. Every control below that lives in a planned
 > component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
@@ -42,7 +43,8 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Bootstrap admission policy (ADR-0008) | shipped as manifests, tested on kind | `deploy/admission/`, `scripts/vap-test.sh` |
 | Controller and bootstrap identities, RBAC | shipped as manifests, tested on kind | `deploy/rbac/controller.yaml` |
 | Host controller (reconciler, binary) | shipped, tested on kind with its own RBAC; image not published | `crates/faubourg-controller/src/{plan,controller,config,main}.rs`, `deploy/controller/`, `scripts/controller-test.sh` |
-| Creating and labelling Providers | planned, roadmap 01 | |
+| Creating and labelling Providers (ADR-0011) | shipped, tested on kind | `crates/faubourg-controller/src/provider.rs`, `scripts/controller-test.sh`, `scripts/e2e-test.sh` |
+| Provider token minting and the `faubourg-provider-tokens` policy (ADR-0011) | shipped, tested on kind | `crates/faubourg-bootstrap/src/provider.rs`, `deploy/admission/bootstrap-policy.yaml`, `scripts/vap-test.sh` |
 | Bootstrap image (SSH client) | shipped as source and Containerfile, tested against OpenSSH; not published | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
 | Zone controller | planned, roadmap 02 | |
 
@@ -59,6 +61,8 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-7 Pinned banlieue binary digest | The script's only proof the binary is genuine. |
 | A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only objects that may be A-3. Root-equivalent across the fleet. |
 | A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace and writes Host status. Cannot read a credential (ADR-0008), but can run the pinned image with any of them (R-5). |
+| A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
+| A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
 
 ## 4. Actors
 
@@ -87,6 +91,7 @@ flowchart LR
     kube -.->|evaluates every Job and Pod in the credentials namespace| vap{{Bootstrap admission policy}}
     ctl -->|TB-1: Hosts, zones, its Jobs, Providers, status| kube
     job -->|TB-2 mounts| kube
+    job -->|TB-6 TokenRequest, bounded by policy| kube
     job -->|TB-3 SSH: host key checked before auth, constant commands| host
     subgraph host [Cloud Hypervisor host]
         sshd[sshd] --> script["/opt/faubourg/install.sh (root)"]
@@ -102,6 +107,7 @@ flowchart LR
 - **TB-3** Job → host sshd (placement and run).
 - **TB-4** install script → artifact repository (curl).
 - **TB-5** banlieue provider → Kubernetes API (banlieue's boundary; see its threat model).
+- **TB-6** bootstrap pod → Kubernetes API: TokenRequest for the host's provider (ADR-0011).
 
 ## 6. STRIDE, per boundary
 
@@ -131,7 +137,10 @@ flowchart LR
 | The controller starts with an image by tag, or with a malformed namespace or script source | T | It refuses to start (`config.rs`, `the_image_is_required_and_must_be_pinned`, `a_malformed_default_script_is_refused`; `controller-test`: "the controller refuses an image by tag"). An image other than A-8's is refused by the API server anyway. |
 | Two controller instances race and write conflicting state | T | `replicas: 1`, `Recreate` (`deploy/controller/deployment.yaml`). Every write is idempotent: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller`. |
 | A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
-| The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch` on `providers.banlieue.io` only (`deploy/rbac/controller.yaml`; `vap-test` checks it cannot patch a Provider or read a Secret there). |
+| The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch`, `create`, `patch` on `providers.banlieue.io` only: no delete, no Secret, no `serviceaccounts/token` (`deploy/rbac/controller.yaml`; `vap-test` checks each). |
+| faubourg overwrites an adopted host's Provider, or deletes one | T, D | An adopted host's Provider gets labels only, by server-side apply, never its spec (`provider.rs`, `an_adopted_host_gets_labels_and_nothing_else`; `controller-test` checks faubourg owns no spec field). faubourg holds no delete on Providers and sets no ownerReference, so deleting a Host keeps its Provider (`controller-test`, `e2e-test`). |
+| A Host bootstraps under a Managed class, so banlieue would also run an in-cluster provider for it | T | Only an `External` class: otherwise the Host is `Failed` and nothing is created (`plan.rs`, `a_class_that_is_missing_or_not_external_fails_the_host_and_creates_nothing`; `controller-test`). |
+| A Job runs before the provider has an identity, so the token request fails or targets a stale ServiceAccount | D | No Job until banlieue reports `status.workload.mode: External` (`plan.rs`, `no_job_until_banlieue_gives_the_provider_its_identity`; `controller-test`, `e2e-test`). |
 | A forged `Provider` status marks a host healthy | S | Out of faubourg's control: whoever can write `Provider` status is inside banlieue's trust boundary (banlieue's threat model). faubourg only reads it. |
 | A status message leaks a credential or command line | I | Phase messages are fixed strings or the validation summary, which names fields, never values from Secrets (`phase.rs`, `Decision::message`). |
 | The controller's logs leak an address or a secret | I | Logs carry Host, zone and Job names, phases and reasons only (`controller.rs`); the controller never reads a Secret. `controller-test` fails if a fixture address appears in the logs. |
@@ -157,7 +166,7 @@ flowchart LR
 | --- | --- | --- |
 | Man in the middle | S, I | The host key is judged in russh's `check_server_key`, before any authentication is sent (`crates/faubourg-bootstrap/src/ssh.rs`). `Strict` is the default (`host.rs`, `defaults_are_the_safe_ones`) and accepts nothing without `knownHosts`; a Secret with `knownHosts` is always strict (`hostkey.rs`, `known_hosts_overrides_trust_on_first_use`); `@revoked`, hashed and wildcard lines never admit a key (`hostkey.rs` tests). Every connection of a run must see the first one's key (`first_use_accepts_the_first_key_then_only_it`). RSA host keys and host certificates are refused. All of it is exercised against OpenSSH in `bootstrap-test`. |
 | TOFU pins an attacker's key, or a pod pins junk into a Host | S, T | TOFU must be explicit; the first connection is open to interception (accepted, R-8). The controller pins a fingerprint only from the Host's own succeeded Job, read from that Job's own pod, only when well-formed and none is pinned yet; a pinned key is never replaced (`plan.rs`, `a_first_use_key_is_pinned_from_a_succeeded_job`, `a_pinned_key_is_never_replaced`, `no_key_is_pinned_from_a_failed_job_a_strict_host_or_another_jobs_pod`, `a_malformed_report_pins_nothing`). |
-| A Host field or the script becomes a shell command on the host | E | Every command is a constant (`crates/faubourg-bootstrap/src/remote.rs`); the script, the sudo rule and a key to revoke travel on stdin. The programs set their own `PATH` and contain no single quote (`programs_survive_single_quoting`). |
+| A Host field or the script becomes a shell command on the host | E | Every command is a constant (`crates/faubourg-bootstrap/src/remote.rs`); the script, the sudo rule, a key to revoke and the provider credential bundle travel on stdin. The default install script validates the bundle's names and token characters before using them (`examples/host/install.sh`). The programs set their own `PATH` and contain no single quote (`programs_survive_single_quoting`). |
 | A half-written script or sudo rule is left in place | T | Both are written to a temporary file in the same directory and moved into place; the rule only after `visudo -cf` accepts it; the result is checked again with the scoped account before anything runs (`steps.rs`, `placement_writes_script_and_rule_checks_again_then_runs`, `still_not_in_place_after_placement_is_drift`). |
 | The script is in place but writable by someone other than root | E | "In place" requires `root:root 0755` on `/opt/faubourg` and the script, not only the hash (`remote.rs`, `in_place_needs_owner_mode_and_hash`; `bootstrap-test`: "a script made writable is drift, not run"). |
 | A retry loop hammers a host with a refused key, or re-runs after drift | D | `podFailurePolicy` fails the Job at once on exit 64 (`ScriptDrift`) and 65 (host key refused); other failures retry twice; one hour deadline (`job.rs`, `drift_and_a_refused_host_key_fail_the_job_without_retries`). |
@@ -173,6 +182,17 @@ flowchart LR
 | Downgrade to plain HTTP | T, I | `curl --proto '=https' --tlsv1.2`. |
 | Internal CA not trusted | D | `CA_BUNDLE` setting. |
 
+### TB-6: bootstrap pod → Kubernetes API (provider tokens)
+
+| Threat | STRIDE | Control |
+| --- | --- | --- |
+| The bootstrap identity mints a token for banlieue's operator, or for any ServiceAccount in its namespace | E | `faubourg-provider-tokens`: from `faubourg-bootstrap`, a TokenRequest is admitted only for a name starting with A-8's `providerServiceAccountPrefix` (`banlieue-provider-<class>-`), at most 86400 seconds, for the API server's own audiences (A-8's `apiAudiences`), bound to no object (`deploy/admission/bootstrap-policy.yaml`; `vap-test`: the operator's ServiceAccount, another class, 48 hours, another audience and a bound token are each refused). |
+| The bootstrap identity does anything else | E | Its only RBAC is `create` on `serviceaccounts/token` in banlieue's namespace (`deploy/rbac/controller.yaml`; `vap-test` checks it cannot read a Secret there or in the credentials namespace, nor mint elsewhere). |
+| A long-lived or differently scoped bootstrap token | E | The Job policy admits the `kube-api` volume only as a projected token of at most 600 seconds for the default audience plus `kube-root-ca.crt`; `automountServiceAccountToken` stays false (`vap-test`: a day's token, another audience, a Secret in the projection, another ConfigMap, a Secret named `kube-api`). |
+| The controller mints or sees a provider token | I, E | It holds no `serviceaccounts/token` anywhere (`vap-test`), and the token never passes through it: minted in the pod, sent on the install script's stdin, never in the Job, a Secret or a log (`e2e-test` checks the Job, its log and the controller's log). |
+| The provider token reaches a server the attacker runs | I | A compromised controller can pair a password or first-use credential with an address of its choosing (R-5), and the token goes there. It is one provider's, for a day. A `knownHosts` key confines it to the pinned host. |
+| A pod cannot read its own credentials and fails in a way that hides a misconfiguration | D | `fsGroup` makes the root-owned Secret files readable by the bootstrap user (`job.rs`, `the_restricted_security_profile`); found by `e2e-test`, which runs the real image against real mounts. |
+
 ## 7. Hardening that exists today
 
 - No free-form arguments or shell in any CR field (`BootstrapSpec`).
@@ -185,6 +205,9 @@ flowchart LR
 - Bootstrap Jobs are admitted only in the bootstrap shape, and Pods in the credentials
   namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
   against a real API server (`make vap-test`).
+- A bootstrapped host's Provider is created by faubourg and its first token minted by the
+  bootstrap pod, bounded by RBAC and `faubourg-provider-tokens`; the controller never holds a
+  token (`make e2e-test`).
 - The bootstrap image is one static binary with no shell, runs as UID 65532, verifies the
   host key before authenticating, and sends only constant commands (`crates/faubourg-bootstrap`,
   `images/bootstrap/Containerfile`), tested against OpenSSH (`make bootstrap-test`).
@@ -215,9 +238,11 @@ flowchart LR
 | R-3 | The controls marked planned above do not exist yet: Provider creation, published and signed images, and a run against a real hypervisor. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
 | R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
-| R-7 | Until faubourg creates Providers, whoever can label one in banlieue's namespace decides which Provider is a host's, and so can make a Host `Ready`. They can already create a Provider banlieue places on, so this grants nothing new (ADR-0009 consequences). | faubourg creates Providers and owns the label by field manager (roadmap 01). |
+| R-7 | Whoever can label Providers in banlieue's namespace can attach a second one to a host, which makes it `ProviderAmbiguous` (fails closed), or label an adopted host's Provider before faubourg does. They can already create a Provider banlieue places on, so this grants nothing new. Narrowed by ADR-0011: faubourg now owns the label on the Provider it creates. | banlieue publishes which Provider a host is, rather than a label. |
 | R-8 | `TrustOnFirstUse` accepts whatever key answers the first connection. Mitigated: explicit opt-in, pinned after the first success, `knownHosts` overrides it. | SSH host certificates are supported (ADR-0006 open question). |
 | R-9 | The SSH implementation is russh, with far less review than OpenSSH (ADR-0010 consequences). Mitigated: exact pin, its own Dependabot group, cargo-audit, the host-key decision in faubourg's own tested code, and an image with nothing else to attack. | A russh advisory, or a published audit. |
+| R-10 | faubourg re-derives banlieue's provider ServiceAccount name; a change in banlieue's naming would make faubourg mint for the wrong name (refused, or a 404 until it times out), never a broader one, since the token policy's prefix still applies. | banlieue publishes the name (ADR-0011 consequences). |
+| R-11 | `apiAudiences` must name the API server's own audiences; wrong, and every provider token is refused (fails closed). | A distribution where the audience cannot be known in advance. |
 | R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
@@ -245,4 +270,5 @@ flowchart LR
 | 2026-11-07 | 0001 … 0007 | Second pass: ADR-0003 … ADR-0007 accepted; the phase machine and `Provider` health shipped (TB-1 rows added); CI and supply-chain hardening recorded; the Job namespace question raised. R-1 … R-4 unchanged: no reconciler or Job exists yet, so R-3 stays open. |
 | 2026-11-07 | 0001 … 0008 | Third pass: ADR-0008 (admission policy) and the ADR-0002 and ADR-0005 amendments. The Job builder, the admission policy and the controller RBAC shipped and are tested on a real API server; TB-1 and TB-2 rows rewritten; A-8, R-5, R-6 and three actors added; the Job namespace question closed (credentials namespace). R-3 stays open: no reconciler or bootstrap image yet. |
 | 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Accepted) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |
-| 2026-11-07 | 0001 … 0010 | Fifth pass: ADR-0010 (the bootstrap image, Proposed). The image's binary shipped on russh and is tested against OpenSSH in CI; the controller pins first-use keys from succeeded Jobs. TB-2 and TB-3 rewritten from planned to shipped controls: host-key judgement before authentication, constant commands, atomic placement, owner and mode in "in place", revoke, logs. R-8 (first use) and R-9 (russh) added; R-3 narrowed to Provider creation, published images and a real hypervisor. |
+| 2026-11-07 | 0001 … 0010 | Fifth pass: ADR-0010 (the bootstrap image, Accepted). The image's binary shipped on russh and is tested against OpenSSH in CI; the controller pins first-use keys from succeeded Jobs. TB-2 and TB-3 rewritten from planned to shipped controls: host-key judgement before authentication, constant commands, atomic placement, owner and mode in "in place", revoke, logs. R-8 (first use) and R-9 (russh) added; R-3 narrowed to Provider creation, published images and a real hypervisor. |
+| 2026-11-07 | 0001 … 0011 | Sixth pass: ADR-0011 (the host's Provider and its identity, Accepted) and the ADR-0005, ADR-0008 and ADR-0009 amendments. faubourg creates and labels Providers; the bootstrap pod mints the host's first provider token. A-10, A-11 and TB-6 added; TB-1 rows for Provider ownership, the External class and the identity gate; R-7 narrowed; R-10 (naming copy) and R-11 (audiences) added. `e2e-test` found and fixed two bugs: unreadable credentials (`fsGroup`), and Job events that never reached the cluster-scoped Host (`controller.rs`, `owner_host`; both kind tests now fail on it). R-3 stays open: no published image, no real hypervisor. |

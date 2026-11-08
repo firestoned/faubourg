@@ -113,3 +113,5 @@ cluster yet. A running controller has to settle what those ADRs leave open:
 - The reconciler is tested end to end against a real API server (`make controller-test`,
   kind): a Host gets its Job, the admission policy admits it, and an adopted Host reaches
   `Ready` from a labelled, healthy Provider.
+
+*Amended 2026-11-07 by ADR-0011:* decision 5's interim, an operator labelling the Provider, is replaced: faubourg creates the Provider of a bootstrapped host and labels an adopted one. No Job is created before the Provider has its identity.

@@ -93,3 +93,5 @@ design: as accepted, a pod could not have mounted both its Secret and its script
 *Amended 2026-11-07 by ADR-0009 (decision 6):* re-bootstrap follows a change to the Host's
 bootstrap inputs (`address`, `ssh`, the resolved script source), not every new generation, so
 cordoning a host or moving it to another zone runs nothing on it.
+
+*Amended 2026-11-07 by ADR-0011:* the open question of the host-resident provider's kube identity is answered there: the bootstrap pod mints its first token, and the install script receives it on stdin.

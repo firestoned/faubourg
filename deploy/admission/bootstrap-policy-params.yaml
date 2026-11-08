@@ -7,8 +7,15 @@
 # write anywhere. A platform administrator edits this.
 #
 #   image               the bootstrap image, pinned by digest (placeholder below)
-#   serviceAccountName  the bootstrap pods' ServiceAccount (no RBAC)
+#   serviceAccountName  the bootstrap pods' ServiceAccount (TokenRequest on provider
+#                       ServiceAccounts only, ADR-0011)
 #   scriptSources       comma-separated, no spaces: ConfigMap/<name> or Secret/<name>
+#   providerServiceAccountPrefix
+#                       the only ServiceAccounts a bootstrap pod may mint a token for:
+#                       banlieue-provider-<class>- (ADR-0011 decision 8)
+#   apiAudiences        comma-separated: the API server's own token audiences, the only ones
+#                       a provider token may carry. kubeadm and kind default to the one
+#                       below; check `--api-audiences` (or the issuer) on other distributions.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,3 +25,5 @@ data:
   image: "ghcr.io/firestoned/faubourg-bootstrap@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   serviceAccountName: faubourg-bootstrap
   scriptSources: "ConfigMap/faubourg-install"
+  providerServiceAccountPrefix: "banlieue-provider-cloud-hypervisor-"
+  apiAudiences: "https://kubernetes.default.svc.cluster.local"

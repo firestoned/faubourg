@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use banlieue_api::banlieue::Provider;
+use banlieue_api::banlieue::{Provider, ProviderClass};
 use faubourg_api::LABEL_HOST;
 use faubourg_api::host::Host;
 use faubourg_api::validation::is_dns_subdomain;
@@ -25,7 +25,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, ResourceExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY};
@@ -54,6 +54,7 @@ pub enum Error {
 
 struct Ctx {
     hosts: Api<Host>,
+    classes: Api<ProviderClass>,
     zones: Api<AvailabilityZone>,
     jobs: Api<Job>,
     pods: Api<Pod>,
@@ -66,10 +67,11 @@ pub async fn run(client: Client, cfg: Config) {
     let ns = cfg.bootstrap.namespace.clone();
     let ctx = Arc::new(Ctx {
         hosts: Api::all(client.clone()),
+        classes: Api::all(client.clone()),
         zones: Api::all(client.clone()),
         jobs: Api::namespaced(client.clone(), &ns),
         pods: Api::namespaced(client.clone(), &ns),
-        providers: Api::namespaced(client.clone(), &cfg.provider_namespace),
+        providers: Api::namespaced(client.clone(), &cfg.bootstrap.provider.namespace),
         cfg,
     });
     let controller = Controller::new(ctx.hosts.clone(), watcher::Config::default());
@@ -79,9 +81,12 @@ pub async fn run(client: Client, cfg: Config) {
         faubourg_api::PROJECT
     );
     controller
-        .owns(
+        // Not `owns`: it maps a Job to its owner in the Job's namespace, and a Host is
+        // cluster-scoped, so every Job event would miss.
+        .watches(
             ctx.jobs.clone(),
             watcher::Config::default().labels(&bootstrap_jobs),
+            |job: Job| owner_host(&job).map(|h| ObjectRef::new(&h)),
         )
         .watches(
             ctx.zones.clone(),
@@ -104,11 +109,30 @@ pub async fn run(client: Client, cfg: Config) {
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx)
         .for_each(|r| async move {
-            if let Err(e) = r {
-                warn!(error = %e, "reconcile failed");
+            match r {
+                // A deleted Host's Jobs and Provider still send events, for a Host that is gone.
+                Err(kube::runtime::controller::Error::ObjectNotFound(o)) => {
+                    debug!(host = %o.name, "event for a Host that no longer exists");
+                }
+                Err(e) => warn!(error = %e, "reconcile failed"),
+                Ok(_) => {}
             }
         })
         .await;
+}
+
+/// The Host controlling a Job, by name: a Host has no namespace.
+fn owner_host(job: &Job) -> Option<String> {
+    job.metadata
+        .owner_references
+        .iter()
+        .flatten()
+        .find(|r| {
+            r.controller == Some(true)
+                && r.kind == "Host"
+                && r.api_version == format!("{}/{}", faubourg_api::GROUP, faubourg_api::VERSION)
+        })
+        .map(|r| r.name.clone())
 }
 
 async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
@@ -123,6 +147,11 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let jobs = ctx.jobs.list(&by_host).await?.items;
     let pods = ctx.pods.list(&by_host).await?.items;
     let providers = ctx.providers.list(&by_host).await?.items;
+    let own_provider = ctx.providers.get_opt(&name).await?;
+    let class = ctx
+        .classes
+        .get_opt(&ctx.cfg.bootstrap.provider.class)
+        .await?;
     let now = Time(Timestamp::now());
 
     let p = plan(&World {
@@ -131,10 +160,25 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         jobs: &jobs,
         pods: &pods,
         providers: &providers,
+        own_provider: own_provider.as_ref(),
+        class: class.as_ref(),
         cfg: &ctx.cfg.bootstrap,
         now: &now,
     })?;
 
+    // The Provider first: banlieue gives it its identity, and only then is a Job created.
+    if let Some(body) = &p.apply_provider {
+        ctx.providers
+            .patch(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(body),
+            )
+            .await?;
+        if own_provider.is_none() {
+            info!(host = %name, provider = %name, "created the host's Provider");
+        }
+    }
     for job in &p.delete {
         match ctx.jobs.delete(job, &DeleteParams::background()).await {
             Ok(_) => info!(host = %name, job = %job, "deleted stale bootstrap Job"),
@@ -180,4 +224,42 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 fn error_policy(host: Arc<Host>, e: &Error, _ctx: Arc<Ctx>) -> Action {
     warn!(host = %host.name_any(), error = %e, "reconcile failed; retrying");
     Action::requeue(RETRY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn job(owners: &serde_json::Value) -> Job {
+        serde_json::from_value(json!({
+            "metadata": { "name": "bootstrap-hv01-g1", "namespace": "faubourg-credentials",
+                          "ownerReferences": owners }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_job_maps_to_its_cluster_scoped_host() {
+        let j = job(
+            &json!([{ "apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "Host",
+                              "name": "hv01", "uid": "u", "controller": true }]),
+        );
+        assert_eq!(owner_host(&j).as_deref(), Some("hv01"));
+        let r: ObjectRef<Host> = ObjectRef::new("hv01");
+        assert_eq!(r.namespace, None, "a Host has no namespace");
+    }
+
+    #[test]
+    fn a_job_with_another_owner_maps_to_nothing() {
+        for owners in [
+            json!([]),
+            json!([{ "apiVersion": "batch/v1", "kind": "CronJob", "name": "x", "uid": "u",
+                     "controller": true }]),
+            json!([{ "apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "Host",
+                     "name": "hv01", "uid": "u" }]),
+        ] {
+            assert_eq!(owner_host(&job(&owners)), None, "{owners}");
+        }
+    }
 }

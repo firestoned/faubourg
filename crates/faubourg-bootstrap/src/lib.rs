@@ -6,12 +6,14 @@
 //!
 //! - [`config`]: the Job's environment and mounts, refused before any connection if malformed.
 //! - [`hostkey`]: which host keys a run accepts.
+//! - [`provider`]: the host's first provider token, and the bundle that carries it.
 //! - [`remote`]: the constant commands sent to the host.
 //! - [`steps`]: check, place, check again, revoke, run, against a [`steps::Remote`].
 //! - [`ssh`]: [`steps::Remote`] over SSH, on russh.
 
 pub mod config;
 pub mod hostkey;
+pub mod provider;
 pub mod remote;
 pub mod ssh;
 pub mod steps;

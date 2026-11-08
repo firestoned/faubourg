@@ -71,6 +71,7 @@ flowchart LR
     service-banlieue-ch-provider -->|HTTP| service-cloud-hypervisor
     system-banlieue --> data-asset-provider-cr
     service-host-controller --> data-asset-provider-cr
+    service-bootstrap-job -->|HTTPS| ecosystem-kube-api
 ```
 
 <sub>Source: nodes and relationships in `architecture.json`.</sub>

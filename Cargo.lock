@@ -924,6 +924,8 @@ name = "faubourg-bootstrap"
 version = "0.1.0"
 dependencies = [
  "faubourg-api",
+ "k8s-openapi",
+ "kube",
  "russh",
  "serde_json",
  "sha2",

@@ -55,6 +55,9 @@ pub struct Plan {
     pub run_user: String,
     /// The placement credential, when mounted.
     pub placement: Option<Placement>,
+    /// The install script's standard input: the provider credential bundle (ADR-0011
+    /// decision 9), or nothing.
+    pub run_stdin: Vec<u8>,
 }
 
 /// The placement credential, as the steps need it.
@@ -145,7 +148,7 @@ async fn steps<R: Remote>(r: &mut R, plan: &Plan) -> Result<Outcome, R::Error> {
         }
     }
     tracing::info!("running the install script");
-    let o = r.exec(Who::Run, remote::RUN, &[], true).await?;
+    let o = r.exec(Who::Run, remote::RUN, &plan.run_stdin, true).await?;
     if o.status == 0 {
         Ok(Outcome::Succeeded)
     } else {
@@ -238,6 +241,7 @@ mod tests {
             script: b"#!/bin/sh\n".to_vec(),
             run_user: "faubourg".into(),
             placement,
+            run_stdin: Vec::new(),
         }
     }
 
@@ -385,5 +389,20 @@ mod tests {
     fn other_transport_errors_are_errors() {
         let mut f = Fake::new(vec![Err(FakeError::Reset)]);
         assert!(run(bootstrap(&mut f, &plan(None))).is_err());
+    }
+
+    #[test]
+    fn the_credential_bundle_goes_to_the_script_and_nowhere_else() {
+        let mut f = Fake::new(vec![ok(1), ok(0), ok(0), in_place(), ok(0)]);
+        let mut p = plan(placement(true, false));
+        p.run_stdin = b"faubourg-provider-credential v1\n".to_vec();
+        run(bootstrap(&mut f, &p)).unwrap();
+        let (last, rest) = f.calls.split_last().unwrap();
+        assert_eq!(last.1, remote::RUN);
+        assert_eq!(last.2, p.run_stdin);
+        assert!(
+            rest.iter().all(|c| c.2 != p.run_stdin),
+            "never to placement or check"
+        );
     }
 }

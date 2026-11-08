@@ -86,3 +86,5 @@ Secret its Host names. The design has to make that check unnecessary.
   of CEL: a fake that admits more than the API server would hide a hole.
 - The controller holds no secret material, so its own memory, logs and crash dumps cannot leak
   any.
+
+*Amended 2026-11-07 by ADR-0011 (decisions 6 to 8):* a bootstrap Job also mounts a `kube-api` volume, a projected token of at most 600 seconds for its own ServiceAccount and the cluster CA, admitted only in that shape; the bootstrap ServiceAccount, which held nothing, may create `serviceaccounts/token` in banlieue's namespace, bounded by a third policy, `faubourg-provider-tokens`.

@@ -63,6 +63,10 @@ kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-pol
 kubectl apply -f "$ROOT/deploy/admission/bootstrap-policy.yaml" >/dev/null
 kubectl -n "$CREDS" create secret generic hv01-ssh --from-literal=username=faubourg >/dev/null
 kubectl -n "$CREDS" create configmap faubourg-install --from-literal=install.sh='#!/bin/sh' >/dev/null
+kubectl apply -f - >/dev/null <<'JSON'
+{"apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass", "metadata": {"name": "cloud-hypervisor"},
+ "spec": {"backend": "cloud-hypervisor", "deployment": "External"}}
+JSON
 
 # The controller's own identity: a kubeconfig holding only its ServiceAccount token.
 SERVER="$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')"
@@ -83,6 +87,7 @@ fail() { echo "FAIL $1: $2"; failures=$((failures + 1)); }
 
 echo "--- configuration fails closed"
 if KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE=registry.k8s.io/pause:3.10 \
+  FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
   "$BIN" >"$WORK/refused.log" 2>&1; then
   fail "an image by tag" "the controller started"
 elif grep -qF "pinned by digest" "$WORK/refused.log"; then
@@ -94,6 +99,7 @@ fi
 echo "controller-test: starting the controller"
 KUBECONFIG="$CTL_KUBECONFIG" FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" \
   FAUBOURG_DEFAULT_SCRIPT=ConfigMap/faubourg-install RUST_LOG=info,kube=warn \
+  FAUBOURG_PROVIDER_API_SERVER=https://kubernetes.default.svc \
   "$BIN" >"$WORK/controller.log" 2>&1 &
 CTL_PID=$!
 
@@ -140,8 +146,16 @@ kubectl apply -f - >/dev/null <<'EOF'
  "metadata": {"name": "az1"}, "spec": {"storage": {"mode": "Local"}}}
 EOF
 
-echo "--- a Host gets its Job"
+echo "--- a Host gets its Provider, then its Job (ADR-0011)"
 host hv01 az1 "$ADDR1" Script
+eventually "faubourg creates the host's Provider" 60 kubectl -n "$BANLIEUE" get provider hv01
+eventually "no Job before the Provider has an identity" 30 phase_is hv01 Pending AwaitingProviderIdentity
+# banlieue's operator, simulated: it reports the Provider's identity.
+identity() {
+  kubectl -n "$BANLIEUE" patch provider "$1" --subresource=status --type=merge \
+    -p "{\"status\": {\"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\"}}}" >/dev/null
+}
+identity hv01
 eventually "the Job is created and admitted" 90 job_exists bootstrap-hv01-g1
 eventually "the Host is Bootstrapping" 30 phase_is hv01 Bootstrapping BootstrapJobRunning
 eventually "the Job's pod runs the pinned image" 60 bash -c \
@@ -156,6 +170,14 @@ eventually "the Host still has only its first Job" 5 jobs_are hv01 "job.batch/bo
 echo "--- changed inputs replace the Job"
 kubectl patch host hv01 --type=merge -p "{\"spec\": {\"address\": \"$ADDR1B\"}}" >/dev/null
 eventually "the stale Job goes and a new one comes" 60 jobs_are hv01 "job.batch/bootstrap-hv01-g3 "
+
+echo "--- the ProviderClass must be External"
+kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "Managed"}}' >/dev/null
+host hv05 az1 hv05.home.example Script
+eventually "a Managed class fails the Host" 30 phase_is hv05 Failed ProviderClassNotExternal
+never "and creates no Provider" 5 kubectl -n "$BANLIEUE" get provider hv05
+kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "External"}}' >/dev/null
+kubectl delete host hv05 >/dev/null
 
 echo "--- the zone gates the bootstrap"
 host hv02 az9 hv02.home.example Script
@@ -180,6 +202,12 @@ EOF
 }
 provider hv03
 eventually "the Host is Ready from a healthy Provider" 30 phase_is hv03 Ready ProviderHealthy
+eventually "faubourg labels the adopted Provider with its zone" 30 bash -c \
+  "[ \"\$(kubectl -n $BANLIEUE get provider hv03 -o jsonpath='{.metadata.labels.faubourg\\.firestoned\\.io/zone}')\" = az1 ]"
+if kubectl -n "$BANLIEUE" get provider hv03 -o json \
+   | jq -e '.metadata.managedFields | map(select(.manager == "faubourg.firestoned.io/host-controller")) | any(.fieldsV1 | has("f:spec"))' >/dev/null; then
+  fail "the adopted Provider" "faubourg owns spec fields"
+else pass "and never writes its spec"; fi
 eventually "status names the Provider" 5 bash -c \
   "[ \"\$(kubectl get host hv03 -o jsonpath='{.status.providerRef}')\" = hv03 ]"
 provider hv03-copy
@@ -198,6 +226,8 @@ fi
 echo "--- deleting a Host deletes its Job"
 kubectl delete host hv01 --wait=true >/dev/null
 eventually "the Job is garbage collected" 60 bash -c "! kubectl -n $CREDS get job bootstrap-hv01-g3"
+if kubectl -n "$BANLIEUE" get provider hv01 >/dev/null 2>&1; then pass "the Provider is kept"
+else fail "the Provider" "was deleted with its Host"; fi
 
 echo "--- logs"
 if kill -0 "$CTL_PID" 2>/dev/null; then pass "the controller is still running"
@@ -207,6 +237,9 @@ if grep -qE "$ADDR1|$ADDR1B|hv02\.home|hv03\.home" "$WORK/controller.log"; then
 else
   pass "the logs carry no Host address"
 fi
+if grep -qF 'not found in local store' "$WORK/controller.log"; then
+  fail "the controller's watches" "$(grep -F 'not found in local store' "$WORK/controller.log" | head -2)"
+else pass "every watch event maps to a Host"; fi
 # An admission denial also reads "forbidden"; only an RBAC refusal counts here.
 if grep -i 'forbidden' "$WORK/controller.log" | grep -qv 'ValidatingAdmissionPolicy'; then
   fail "RBAC" "$(grep -i 'forbidden' "$WORK/controller.log" | grep -v ValidatingAdmissionPolicy | head -3)"

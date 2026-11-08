@@ -12,7 +12,9 @@
 # places it on every host whose copy differs.
 #
 # The script takes no arguments and reads no environment: everything it does is in this
-# file, which root owns.
+# file, which root owns. Its only input is stdin: faubourg's bootstrap writes the host's
+# provider credential there (ADR-0011 decision 9). It installs that credential where
+# banlieue's provider reads it, and keeps an existing one when stdin is empty.
 
 set -eu
 umask 022
@@ -36,6 +38,42 @@ DEST="${DEST_DIR}/banlieue-${BANLIEUE_VERSION}"
 
 [ "$(id -u)" -eq 0 ] || { echo "install.sh: must run as root (sudo -n /opt/faubourg/install.sh)" >&2; exit 1; }
 [ "$#" -eq 0 ] || { echo "install.sh: takes no arguments" >&2; exit 2; }
+
+# ----- the provider credential bundle on stdin (ADR-0011) ---------------------------------
+# faubourg-provider-credential v1
+# provider <name>
+# namespace <namespace>
+# token <token>
+# kubeconfig
+# <kubeconfig, to the end>
+CRED_DIR=/etc/banlieue/credentials
+PROVIDER_NAME=""
+PROVIDER_NAMESPACE=""
+TOKEN=""
+KUBECONFIG_TEXT=""
+bad_bundle() { echo "install.sh: malformed credential bundle on stdin" >&2; exit 1; }
+if IFS= read -r header; then
+    [ "$header" = "faubourg-provider-credential v1" ] || bad_bundle
+    IFS=' ' read -r key PROVIDER_NAME && [ "$key" = provider ] || bad_bundle
+    IFS=' ' read -r key PROVIDER_NAMESPACE && [ "$key" = namespace ] || bad_bundle
+    IFS=' ' read -r key TOKEN && [ "$key" = token ] || bad_bundle
+    IFS= read -r key && [ "$key" = kubeconfig ] || bad_bundle
+    KUBECONFIG_TEXT="$(cat)"
+    case "$PROVIDER_NAME" in ''|*[!a-z0-9.-]*) bad_bundle ;; esac
+    case "$PROVIDER_NAMESPACE" in ''|*[!a-z0-9-]*) bad_bundle ;; esac
+    case "$TOKEN" in ''|*[!A-Za-z0-9._-]*) bad_bundle ;; esac
+    [ -n "$KUBECONFIG_TEXT" ] || bad_bundle
+fi
+
+# Writes $2 to $1 as the banlieue user, mode 0600, through a temporary file in the same
+# directory. The content is never echoed.
+write_credential() {
+    tmp_cred="$(umask 077; mktemp "${CRED_DIR}/.credential.XXXXXX")"
+    printf '%s' "$2" >"$tmp_cred"
+    chown banlieue: "$tmp_cred"
+    chmod 0600 "$tmp_cred"
+    mv -f "$tmp_cred" "$1"
+}
 command -v curl >/dev/null 2>&1 || { echo "install.sh: curl not found" >&2; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo "install.sh: sha256sum not found" >&2; exit 1; }
 
@@ -57,8 +95,22 @@ if [ ! -x "$DEST" ] || ! echo "${BANLIEUE_SHA256}  ${DEST}" | sha256sum -c - >/d
 fi
 ln -sfn "$DEST" "${DEST_DIR}/banlieue"
 
-# banlieue's installer is idempotent by stage; preflight and selftest change nothing.
+# banlieue's installer is idempotent by stage; preflight and selftest change nothing. With a
+# bundle, the Provider is named, and the installer runs again once the credential is in
+# place, so it enables the provider it could not enable without one.
+if [ -n "$PROVIDER_NAME" ]; then
+    BANLIEUE_HOST_PROVIDER_NAME="$PROVIDER_NAME"
+    BANLIEUE_HOST_PROVIDER_NAMESPACE="$PROVIDER_NAMESPACE"
+    export BANLIEUE_HOST_PROVIDER_NAME BANLIEUE_HOST_PROVIDER_NAMESPACE
+fi
 "${DEST_DIR}/banlieue" host cloud-hypervisor preflight
 # shellcheck disable=SC2086 # INSTALL_FLAGS is word-split on purpose; root owns its value
 "${DEST_DIR}/banlieue" host cloud-hypervisor install $INSTALL_FLAGS
+if [ -n "$TOKEN" ]; then
+    write_credential "${CRED_DIR}/token" "$TOKEN"
+    write_credential "${CRED_DIR}/kubeconfig" "$KUBECONFIG_TEXT
+"
+    # shellcheck disable=SC2086
+    "${DEST_DIR}/banlieue" host cloud-hypervisor install $INSTALL_FLAGS
+fi
 "${DEST_DIR}/banlieue" host cloud-hypervisor selftest

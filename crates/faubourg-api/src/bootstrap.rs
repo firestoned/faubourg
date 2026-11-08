@@ -24,6 +24,22 @@ pub const MOUNT_PLACEMENT: &str = "/var/run/faubourg/placement";
 pub const MOUNT_SCRIPT: &str = "/var/run/faubourg/script";
 /// The script's file name inside [`MOUNT_SCRIPT`], whatever its key in the source.
 pub const SCRIPT_FILE: &str = "install.sh";
+/// Volume holding the bootstrap pod's own short-lived API token and the cluster CA
+/// (ADR-0011 decision 6).
+pub const VOLUME_KUBE_API: &str = "kube-api";
+/// Where [`VOLUME_KUBE_API`] is mounted.
+pub const MOUNT_KUBE_API: &str = "/var/run/faubourg/kube-api";
+/// The token's file name inside [`MOUNT_KUBE_API`].
+pub const KUBE_API_TOKEN_FILE: &str = "token";
+/// The cluster CA's file name inside [`MOUNT_KUBE_API`].
+pub const KUBE_API_CA_FILE: &str = "ca.crt";
+/// The `ConfigMap` the kubelet publishes the cluster CA in, in every namespace.
+pub const KUBE_ROOT_CA_CONFIGMAP: &str = "kube-root-ca.crt";
+/// Lifetime of the bootstrap pod's own token: the API server's minimum.
+pub const KUBE_API_TOKEN_SECONDS: i64 = 600;
+/// Lifetime of the provider token the bootstrap mints for the host: banlieue's default
+/// (banlieue ADR-0060 decision 5). The admission policy refuses longer.
+pub const PROVIDER_TOKEN_SECONDS: i64 = 86_400;
 
 /// Env: the Host's name, for logs.
 pub const ENV_HOST: &str = "FAUBOURG_HOST";
@@ -38,6 +54,19 @@ pub const ENV_HOST_KEY_POLICY: &str = "FAUBOURG_HOST_KEY_POLICY";
 pub const ENV_ACCEPTED_HOST_KEY: &str = "FAUBOURG_ACCEPTED_HOST_KEY";
 /// Env: `true` to remove the placement key from the host once placement succeeds.
 pub const ENV_REVOKE_PLACEMENT: &str = "FAUBOURG_REVOKE_PLACEMENT";
+/// Env: the host's Provider (ADR-0011 decision 1).
+pub const ENV_PROVIDER: &str = "FAUBOURG_PROVIDER";
+/// Env: the Provider's namespace.
+pub const ENV_PROVIDER_NAMESPACE: &str = "FAUBOURG_PROVIDER_NAMESPACE";
+/// Env: the Provider's `ServiceAccount`, which the bootstrap mints the host's token for.
+pub const ENV_PROVIDER_SERVICE_ACCOUNT: &str = "FAUBOURG_PROVIDER_SERVICE_ACCOUNT";
+/// Env: the API server address the host's provider uses (`https://...`).
+pub const ENV_PROVIDER_API_SERVER: &str = "FAUBOURG_PROVIDER_API_SERVER";
+
+/// First line of the credential bundle on the install script's stdin (ADR-0011 decision 9).
+pub const BUNDLE_HEADER: &str = "faubourg-provider-credential v1";
+/// Where the host's provider reads its token (banlieue's path).
+pub const HOST_TOKEN_PATH: &str = "/etc/banlieue/credentials/token";
 
 /// Exit code: anything that is not drift or a refused host key, from a malformed input to a
 /// failing install script. The Job's `backoffLimit` retries it.

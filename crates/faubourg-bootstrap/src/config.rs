@@ -9,10 +9,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use faubourg_api::bootstrap::{
-    ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT,
-    ENV_REVOKE_PLACEMENT, MOUNT_CREDENTIALS, MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE,
-    is_fingerprint,
+    ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT, ENV_PROVIDER,
+    ENV_PROVIDER_API_SERVER, ENV_PROVIDER_NAMESPACE, ENV_PROVIDER_SERVICE_ACCOUNT,
+    ENV_REVOKE_PLACEMENT, KUBE_API_CA_FILE, KUBE_API_TOKEN_FILE, MOUNT_CREDENTIALS, MOUNT_KUBE_API,
+    MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, is_fingerprint,
 };
+use faubourg_api::validation::{is_dns_label, is_dns_subdomain};
+
+use crate::provider::{PodAccess, Target};
 use faubourg_api::credentials::{
     CredentialError, KEY_CERTIFICATE, KEY_KNOWN_HOSTS, KEY_PASSPHRASE, KEY_PASSWORD,
     KEY_PRIVATE_KEY, KEY_USERNAME, SshCredentials,
@@ -52,6 +56,20 @@ pub struct Config {
     pub placement: Option<SshCredentials>,
     /// The install script's content.
     pub script: Vec<u8>,
+    /// The host's Provider and the pod's own API access, when the Job carries them
+    /// (ADR-0011). Without them no provider token is minted.
+    pub provider: Option<ProviderInputs>,
+}
+
+/// What minting the host's provider token needs.
+#[derive(Clone, Debug)]
+pub struct ProviderInputs {
+    /// The Provider and its `ServiceAccount`.
+    pub target: Target,
+    /// The pod's own token and CA, as files.
+    pub access: PodAccess,
+    /// The cluster CA, for the host's kubeconfig.
+    pub ca_pem: Vec<u8>,
 }
 
 impl std::fmt::Debug for Config {
@@ -68,6 +86,10 @@ impl std::fmt::Debug for Config {
                 &self.placement.as_ref().map(|p| &p.username),
             )
             .field("script_bytes", &self.script.len())
+            .field(
+                "provider",
+                &self.provider.as_ref().map(|p| &p.target.provider),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -143,6 +165,7 @@ impl Config {
         if script.is_empty() {
             return Err(ConfigError::EmptyScript);
         }
+        let provider = provider_inputs(&get, env, root)?;
         Ok(Self {
             host,
             address,
@@ -153,7 +176,80 @@ impl Config {
             run,
             placement,
             script,
+            provider,
         })
+    }
+}
+
+/// The provider inputs: all four variables and the `kube-api` volume, or none of them.
+fn provider_inputs(
+    get: &dyn Fn(&'static str) -> Option<String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    root: &Path,
+) -> Result<Option<ProviderInputs>, ConfigError> {
+    let vars = [
+        ENV_PROVIDER,
+        ENV_PROVIDER_NAMESPACE,
+        ENV_PROVIDER_SERVICE_ACCOUNT,
+        ENV_PROVIDER_API_SERVER,
+    ];
+    if vars.iter().all(|k| get(k).is_none()) {
+        return Ok(None);
+    }
+    let need = |k: &'static str| get(k).ok_or(ConfigError::MissingEnv(k));
+    let provider = need(ENV_PROVIDER)?;
+    let namespace = need(ENV_PROVIDER_NAMESPACE)?;
+    let service_account = need(ENV_PROVIDER_SERVICE_ACCOUNT)?;
+    let api_server = need(ENV_PROVIDER_API_SERVER)?;
+    if !is_dns_subdomain(&provider) {
+        return Err(ConfigError::InvalidEnv(ENV_PROVIDER));
+    }
+    if !is_dns_label(&namespace) {
+        return Err(ConfigError::InvalidEnv(ENV_PROVIDER_NAMESPACE));
+    }
+    if !is_dns_subdomain(&service_account) {
+        return Err(ConfigError::InvalidEnv(ENV_PROVIDER_SERVICE_ACCOUNT));
+    }
+    if !api_server.starts_with("https://")
+        || api_server
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(ConfigError::InvalidEnv(ENV_PROVIDER_API_SERVER));
+    }
+    let dir = under(root, MOUNT_KUBE_API);
+    let token_file = dir.join(KUBE_API_TOKEN_FILE);
+    if !token_file.is_file() {
+        return Err(ConfigError::Unreadable(token_file));
+    }
+    let ca_file = dir.join(KUBE_API_CA_FILE);
+    let ca_pem = std::fs::read(&ca_file).map_err(|_| ConfigError::Unreadable(ca_file.clone()))?;
+    Ok(Some(ProviderInputs {
+        target: Target {
+            provider,
+            namespace,
+            service_account,
+            api_server,
+        },
+        access: PodAccess {
+            server: in_cluster_server(env),
+            token_file: token_file.to_string_lossy().into_owned(),
+            ca_file: ca_file.to_string_lossy().into_owned(),
+        },
+        ca_pem,
+    }))
+}
+
+/// The API server from inside the cluster: the kubelet's `KUBERNETES_SERVICE_*`, or the
+/// `kubernetes.default.svc` name.
+fn in_cluster_server(env: &dyn Fn(&str) -> Option<String>) -> String {
+    match (
+        env("KUBERNETES_SERVICE_HOST").filter(|h| !h.is_empty()),
+        env("KUBERNETES_SERVICE_PORT").filter(|p| p.parse::<u16>().is_ok()),
+    ) {
+        (Some(h), Some(p)) if h.contains(':') => format!("https://[{h}]:{p}"),
+        (Some(h), Some(p)) => format!("https://{h}:{p}"),
+        _ => "https://kubernetes.default.svc".into(),
     }
 }
 
@@ -313,5 +409,105 @@ mod tests {
         assert!(!d.contains("#!/bin/sh"), "{d}");
         assert!(!d.contains("not-a-real-password"), "{d}");
         assert!(!d.contains("hv01.home.example"), "{d}");
+    }
+
+    fn with_kube_api(r: &Path) {
+        let d = under(r, MOUNT_KUBE_API);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(KUBE_API_TOKEN_FILE), "not-a-real-token").unwrap();
+        std::fs::write(d.join(KUBE_API_CA_FILE), "-----BEGIN CERTIFICATE-----\n").unwrap();
+    }
+
+    fn provider_env() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (ENV_PROVIDER, "hv01"),
+            (ENV_PROVIDER_NAMESPACE, "banlieue-system"),
+            (
+                ENV_PROVIDER_SERVICE_ACCOUNT,
+                "banlieue-provider-cloud-hypervisor-hv01",
+            ),
+            (ENV_PROVIDER_API_SERVER, "https://kube.home.example:6443"),
+            ("KUBERNETES_SERVICE_HOST", "192.0.2.1"),
+            ("KUBERNETES_SERVICE_PORT", "443"),
+        ]
+    }
+
+    #[test]
+    fn the_provider_inputs_are_read_when_the_job_carries_them() {
+        let r = root();
+        with_kube_api(&r);
+        let c = Config::load(&env(&provider_env()), &r).unwrap();
+        let p = c.provider.unwrap();
+        assert_eq!(
+            p.target.service_account,
+            "banlieue-provider-cloud-hypervisor-hv01"
+        );
+        assert_eq!(p.access.server, "https://192.0.2.1:443");
+        assert!(
+            p.access
+                .token_file
+                .ends_with("/var/run/faubourg/kube-api/token")
+        );
+        assert_eq!(p.ca_pem, b"-----BEGIN CERTIFICATE-----\n");
+    }
+
+    #[test]
+    fn no_provider_variables_no_provider() {
+        assert!(Config::load(&env(&[]), &root()).unwrap().provider.is_none());
+    }
+
+    #[test]
+    fn some_provider_variables_or_no_kube_api_volume_is_refused() {
+        let r = root();
+        with_kube_api(&r);
+        for drop in [
+            ENV_PROVIDER,
+            ENV_PROVIDER_NAMESPACE,
+            ENV_PROVIDER_SERVICE_ACCOUNT,
+            ENV_PROVIDER_API_SERVER,
+        ] {
+            let vars: Vec<_> = provider_env()
+                .into_iter()
+                .filter(|(k, _)| *k != drop)
+                .collect();
+            assert!(Config::load(&env(&vars), &r).is_err(), "without {drop}");
+        }
+        assert!(
+            Config::load(&env(&provider_env()), &root()).is_err(),
+            "no kube-api volume"
+        );
+        for (k, v) in [
+            (ENV_PROVIDER_API_SERVER, "http://kube.home.example"),
+            (ENV_PROVIDER_NAMESPACE, "Not_A_Namespace"),
+            (ENV_PROVIDER_SERVICE_ACCOUNT, "-x"),
+        ] {
+            let mut vars = provider_env();
+            vars.push((k, v));
+            assert!(Config::load(&env(&vars), &r).is_err(), "{k}={v}");
+        }
+    }
+
+    #[test]
+    fn the_in_cluster_server_brackets_ipv6_and_falls_back_to_the_service_name() {
+        let e = |h: &str, p: &str| {
+            let (h, p) = (h.to_string(), p.to_string());
+            move |k: &str| match k {
+                "KUBERNETES_SERVICE_HOST" => Some(h.clone()),
+                "KUBERNETES_SERVICE_PORT" => Some(p.clone()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            in_cluster_server(&e("2001:db8::1", "443")),
+            "https://[2001:db8::1]:443"
+        );
+        assert_eq!(
+            in_cluster_server(&e("", "443")),
+            "https://kubernetes.default.svc"
+        );
+        assert_eq!(
+            in_cluster_server(&e("192.0.2.1", "x")),
+            "https://kubernetes.default.svc"
+        );
     }
 }

@@ -40,6 +40,7 @@ Every CI job calls a Make target, so everything runs the same locally.
 | `make calm-diagrams` | Render the Mermaid diagrams from the model. |
 | `make vap-test` | The bootstrap admission policy and controller RBAC against a throwaway kind cluster ([ADR-0008](adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)). Needs kind, kubectl, jq; set `KIND_EXPERIMENTAL_PROVIDER=podman` for rootless podman. Runs in CI. |
 | `make bootstrap-image` | Build the bootstrap image with podman: one static binary, no shell ([ADR-0010](adr/0010-bootstrap-image.md)). |
+| `make e2e-test` | A Host bootstrapped end to end in kind: the real bootstrap image pulled by digest from a local registry, the admission policies, the controller with its own RBAC, an OpenSSH host as a pod; banlieue simulated with kubectl ([ADR-0011](adr/0011-the-hosts-provider-and-its-identity.md)). Needs kind, kubectl, jq, podman. Runs in CI. |
 | `make bootstrap-test` | The bootstrap image against a throwaway OpenSSH host, run the way a Job runs it (read-only, UID 65532, no capabilities). Needs podman, ssh-keygen, jq. Runs in CI. |
 | `make controller-test` | The Host controller binary, with its own ServiceAccount's token, against a throwaway kind cluster ([ADR-0009](adr/0009-host-reconciler.md)). Same tools as `vap-test`. Runs in CI. |
 | `make docs` | Build this site with `mkdocs build --strict`. Needs Poetry. |

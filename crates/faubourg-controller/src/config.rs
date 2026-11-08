@@ -9,7 +9,7 @@ use clap::Parser;
 use faubourg_api::host::{DEFAULT_SCRIPT_KEY, ScriptRef, ScriptSourceKind};
 use faubourg_api::validation::{is_dns_label, is_dns_subdomain};
 
-use crate::job::{BootstrapConfig, is_digest_pinned};
+use crate::job::{BootstrapConfig, ProviderConfig, is_digest_pinned};
 
 /// Flags, as the command line and the environment give them.
 #[derive(Clone, Debug, Parser)]
@@ -47,15 +47,23 @@ pub struct Args {
         default_value = "banlieue-system"
     )]
     pub provider_namespace: String,
+    /// The `ProviderClass` every host's Provider references. It must be `External`.
+    #[arg(
+        long,
+        env = "FAUBOURG_PROVIDER_CLASS",
+        default_value = "cloud-hypervisor"
+    )]
+    pub provider_class: String,
+    /// The API server address the hosts' providers use, `https://...` (ADR-0011 decision 11).
+    #[arg(long, env = "FAUBOURG_PROVIDER_API_SERVER")]
+    pub provider_api_server: String,
 }
 
 /// A validated configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// How bootstrap Jobs are built.
+    /// How bootstrap Jobs are built, and where the hosts' Providers live.
     pub bootstrap: BootstrapConfig,
-    /// banlieue's namespace.
-    pub provider_namespace: String,
 }
 
 /// Why the controller refuses to start.
@@ -70,6 +78,12 @@ pub enum ConfigError {
     /// The bootstrap `ServiceAccount` name is not a valid object name.
     #[error("--bootstrap-service-account is not a valid name")]
     InvalidServiceAccount,
+    /// The `ProviderClass` name is not a valid object name.
+    #[error("--provider-class is not a valid name")]
+    InvalidProviderClass,
+    /// The API server address is not an `https://` URL with a host.
+    #[error("--provider-api-server must be an https:// URL")]
+    InvalidApiServer,
     /// The default script is not `ConfigMap/<name>[:<key>]` or `Secret/<name>[:<key>]`.
     #[error("--default-script must be ConfigMap/<name>[:<key>] or Secret/<name>[:<key>]")]
     InvalidDefaultScript,
@@ -90,6 +104,12 @@ impl Args {
         if !is_dns_subdomain(&self.bootstrap_service_account) {
             return Err(ConfigError::InvalidServiceAccount);
         }
+        if !is_dns_subdomain(&self.provider_class) {
+            return Err(ConfigError::InvalidProviderClass);
+        }
+        if !is_https_url(&self.provider_api_server) {
+            return Err(ConfigError::InvalidApiServer);
+        }
         let default_script = self
             .default_script
             .as_deref()
@@ -101,8 +121,12 @@ impl Args {
                 image: self.bootstrap_image,
                 service_account: self.bootstrap_service_account,
                 default_script,
+                provider: ProviderConfig {
+                    class: self.provider_class,
+                    namespace: self.provider_namespace,
+                    api_server: self.provider_api_server,
+                },
             },
-            provider_namespace: self.provider_namespace,
         })
     }
 }
@@ -126,6 +150,18 @@ pub fn parse_script_ref(s: &str) -> Result<ScriptRef, ConfigError> {
     })
 }
 
+/// `https://<host>[:<port>][/<path>]`, with no whitespace, userinfo, query or fragment.
+fn is_https_url(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    !authority.is_empty()
+        && !authority.starts_with(':')
+        && !s.contains(['@', '?', '#'])
+        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// A `ConfigMap` or `Secret` key that is also a plain file name.
 fn is_plain_key(k: &str) -> bool {
     !k.is_empty()
@@ -144,7 +180,13 @@ mod tests {
                          0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn args(extra: &[&str]) -> Result<Args, clap::Error> {
-        let mut v = vec!["faubourg-controller", "--bootstrap-image", IMAGE];
+        let mut v = vec![
+            "faubourg-controller",
+            "--bootstrap-image",
+            IMAGE,
+            "--provider-api-server",
+            "https://kube.home.example:6443",
+        ];
         v.extend_from_slice(extra);
         Args::try_parse_from(v)
     }
@@ -156,7 +198,12 @@ mod tests {
         assert_eq!(c.bootstrap.service_account, "faubourg-bootstrap");
         assert_eq!(c.bootstrap.image, IMAGE);
         assert_eq!(c.bootstrap.default_script, None);
-        assert_eq!(c.provider_namespace, "banlieue-system");
+        assert_eq!(c.bootstrap.provider.namespace, "banlieue-system");
+        assert_eq!(c.bootstrap.provider.class, "cloud-hypervisor");
+        assert_eq!(
+            c.bootstrap.provider.api_server,
+            "https://kube.home.example:6443"
+        );
     }
 
     #[test]
@@ -167,7 +214,13 @@ mod tests {
             "ghcr.io/firestoned/faubourg-bootstrap@sha256:abc",
             "",
         ] {
-            let a = Args::try_parse_from(["faubourg-controller", "--bootstrap-image", image]);
+            let a = Args::try_parse_from([
+                "faubourg-controller",
+                "--bootstrap-image",
+                image,
+                "--provider-api-server",
+                "https://kube.home.example:6443",
+            ]);
             assert_eq!(
                 a.unwrap().validate(),
                 Err(ConfigError::ImageNotPinned),
@@ -240,5 +293,51 @@ mod tests {
                 "{s}"
             );
         }
+    }
+
+    fn with_api_server(url: &str) -> Args {
+        Args::try_parse_from([
+            "faubourg-controller",
+            "--bootstrap-image",
+            IMAGE,
+            "--provider-api-server",
+            url,
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn the_api_server_is_required_and_must_be_https() {
+        assert!(Args::try_parse_from(["faubourg-controller", "--bootstrap-image", IMAGE]).is_err());
+        for url in [
+            "http://kube.home.example:6443",
+            "https://",
+            "https://:6443",
+            "https://octocat@kube.home.example",
+            "https://kube.home.example/?x=1",
+            "https://kube home.example",
+            "kube.home.example:6443",
+        ] {
+            assert_eq!(
+                with_api_server(url).validate(),
+                Err(ConfigError::InvalidApiServer),
+                "{url}"
+            );
+        }
+        assert!(
+            with_api_server("https://192.0.2.10:6443")
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_provider_class_is_validated() {
+        assert_eq!(
+            args(&["--provider-class", "Cloud_Hypervisor"])
+                .unwrap()
+                .validate(),
+            Err(ConfigError::InvalidProviderClass)
+        );
     }
 }

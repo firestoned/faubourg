@@ -66,9 +66,9 @@ escape hatch ([ADR-0005](../adr/0005-bootstrap-runs-one-scoped-install-script.md
 | Field | Notes |
 | --- | --- |
 | `phase` | `Pending`, `Bootstrapping`, `Ready`, `Degraded` or `Failed` ([Concepts](../concepts.md#lifecycle-of-a-host)). |
-| `providerRef` | The banlieue `Provider` labelled `faubourg.firestoned.io/host: <host>`, when exactly one is. |
+| `providerRef` | The banlieue `Provider` labelled `faubourg.firestoned.io/host: <host>`, when exactly one is. For a bootstrapped host, faubourg creates it, named after the Host. |
 | `acceptedHostKey` | The fingerprint accepted under `TrustOnFirstUse`, pinned afterwards. |
-| `conditions` | `Ready`: `True` only in phase `Ready`. Its reason says why: `AwaitingBootstrapJob`, `BootstrapJobRunning`, `BootstrapJobFailed`, `ScriptDrift`, `HostKeyRefused`, `ZoneNotFound`, `ZoneUnsupported`, `NoScriptSource`, `InvalidSpec`, `AwaitingProvider`, `ProviderAmbiguous`, `ProviderMissing`, `ProviderNotReady`, `HeartbeatNotAlive` or `ProviderHealthy`. |
+| `conditions` | `Ready`: `True` only in phase `Ready`. Its reason says why: `AwaitingBootstrapJob`, `BootstrapJobRunning`, `BootstrapJobFailed`, `ScriptDrift`, `HostKeyRefused`, `ZoneNotFound`, `ZoneUnsupported`, `NoScriptSource`, `InvalidSpec`, `ProviderClassNotExternal`, `AwaitingProviderIdentity`, `AwaitingProvider`, `ProviderAmbiguous`, `ProviderMissing`, `ProviderNotReady`, `HeartbeatNotAlive` or `ProviderHealthy`. |
 | `observedGeneration` | The generation this status describes. |
 | `message` | Human-readable. Never contains secret material or a command line. |
 

@@ -5,7 +5,7 @@
 # and call these targets, and every target runs identically locally.
 
 .PHONY: all help fmt fmt-check lint test deny check crds crds-check calm-validate calm-diagrams \
-	ci-code-changed dco-check dco-check-test check-infra-identifiers check-infra-identifiers-test vap-test controller-test bootstrap-image bootstrap-test \
+	ci-code-changed dco-check dco-check-test check-infra-identifiers check-infra-identifiers-test vap-test controller-test bootstrap-image bootstrap-test e2e-test \
 	docs docs-serve docs-clean
 
 CALM_CLI_VERSION  ?= 1.37.0
@@ -67,7 +67,7 @@ calm-diagrams: ## Render CALM Mermaid diagrams into docs/architecture/diagrams
 # filter cannot coexist with a required aggregator check (a workflow that never
 # triggers reports no context, so the PR blocks forever), so the filter lives
 # here and the `changes` job applies it per job. Keep in sync with build.yaml.
-CI_CODE_PATHS_RE ?= ^(crates/|deploy/|scripts/vap-test\.sh$$|scripts/controller-test\.sh$$|scripts/bootstrap-test\.sh$$|images/|test/sshd/|\.containerignore$$|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
+CI_CODE_PATHS_RE ?= ^(crates/|deploy/|scripts/vap-test\.sh$$|scripts/controller-test\.sh$$|scripts/bootstrap-test\.sh$$|scripts/e2e-test\.sh$$|examples/host/|images/|test/sshd/|\.containerignore$$|\.dockerignore$$|Cargo\.toml$$|Cargo\.lock$$|deny\.toml$$|rust-toolchain\.toml$$|rustfmt\.toml$$|Makefile$$|\.github/workflows/build\.yaml$$)
 
 ci-code-changed: ## Print true/false: does the diff against BASE_REF touch build-relevant paths?
 	@base="$${BASE_REF:-origin/main}"; \
@@ -108,6 +108,11 @@ bootstrap-image: ## Build the bootstrap image with podman (one static binary, no
 
 bootstrap-test: ## The bootstrap image against a real OpenSSH server (podman)
 	@scripts/bootstrap-test.sh
+
+# ----- End to end (ADR-0009 … ADR-0011) --------------------------------------
+
+e2e-test: ## A Host bootstrapped end to end in kind: real image, policies, controller; banlieue simulated
+	@scripts/e2e-test.sh
 
 # ----- Documentation (MkDocs Material) ---------------------------------------
 

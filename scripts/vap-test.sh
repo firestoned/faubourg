@@ -131,6 +131,19 @@ deny "another host's key as the script" "scriptSources allowlist" \
   "$(mut "($P.volumes[] | select(.name == \"script\")) |= {name, secret: {secretName: \"hv02-ssh\"}}")" "${AS[@]}"
 deny "a writable mount" "mounted read-only" "$(mut "$C.volumeMounts[0].readOnly = false")" "${AS[@]}"
 
+echo "--- the kube-api volume (ADR-0011)"
+K='(.spec.template.spec.volumes[] | select(.name == "kube-api"))'
+deny "a long-lived kube-api token" "kube-api volume is a token" \
+  "$(mut "$K.projected.sources[0].serviceAccountToken.expirationSeconds = 86400")" "${AS[@]}"
+deny "a kube-api token for another audience" "kube-api volume is a token" \
+  "$(mut "$K.projected.sources[0].serviceAccountToken.audience = \"vault\"")" "${AS[@]}"
+deny "a Secret smuggled into the kube-api projection" "kube-api volume is a token" \
+  "$(mut "$K.projected.sources += [{\"secret\": {\"name\": \"hv02-ssh\"}}]")" "${AS[@]}"
+deny "another ConfigMap as the cluster CA" "kube-api volume is a token" \
+  "$(mut "$K.projected.sources[1].configMap.name = \"other-script\"")" "${AS[@]}"
+deny "a Secret named kube-api" "kube-api volume is a token" \
+  "$(mut "$K |= {name, secret: {secretName: \"hv02-ssh\"}}")" "${AS[@]}"
+
 echo "--- identity and isolation"
 deny "the default ServiceAccount" "bootstrap ServiceAccount" \
   "$(mut "$P.serviceAccountName = \"default\"")" "${AS[@]}"
@@ -184,8 +197,56 @@ expect_can no "change the policy parameters" update configmaps/faubourg-bootstra
 expect_can no "change the policy" patch validatingadmissionpolicies.admissionregistration.k8s.io
 expect_can no "change the binding" delete validatingadmissionpolicybindings.admissionregistration.k8s.io
 expect_can yes "watch Providers in banlieue's namespace" watch providers.banlieue.io -n banlieue-system
-expect_can no "change a Provider" patch providers.banlieue.io -n banlieue-system
+expect_can yes "label a Provider (ADR-0011)" patch providers.banlieue.io -n banlieue-system
+expect_can no "delete a Provider" delete providers.banlieue.io -n banlieue-system
 expect_can no "read a Secret in banlieue's namespace" get secrets -n banlieue-system
+
+echo "--- provider tokens (ADR-0011)"
+BOOT=system:serviceaccount:faubourg-credentials:faubourg-bootstrap
+kubectl -n banlieue-system create serviceaccount banlieue-provider-cloud-hypervisor-hv01 >/dev/null
+kubectl -n banlieue-system create serviceaccount banlieue-operator >/dev/null
+kubectl -n banlieue-system create serviceaccount banlieue-provider-libvirt-kvm01 >/dev/null
+token() { kubectl -n banlieue-system create token "$@" --as="$BOOT" 2>&1; }
+token_ok() { # name, args...
+  local name=$1 out; shift
+  if out="$(token "$@")" && [ -n "$out" ]; then pass "$name"; else fail "$name" "refused: $out"; fi
+}
+token_deny() { # name, expected message fragment, args...
+  local name=$1 want=$2 out; shift 2
+  if out="$(token "$@")"; then fail "$name" "admitted"
+  elif grep -qF -- "$want" <<<"$out"; then pass "$name"
+  else fail "$name" "refused for another reason: $out"; fi
+}
+for _ in $(seq 1 60); do
+  if ! token banlieue-operator --duration=1h >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+token_ok "a day's token for a provider ServiceAccount" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=24h
+token_deny "a token for banlieue's operator" "only for a provider ServiceAccount" \
+  banlieue-operator --duration=1h
+token_deny "a token for a provider of another class" "only for a provider ServiceAccount" \
+  banlieue-provider-libvirt-kvm01 --duration=1h
+token_deny "a token for longer than a day" "at most a day" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=48h
+token_deny "a token for another audience" "own audience" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=1h --audience=vault
+token_deny "a token bound to an object" "bound to no object" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=1h --bound-object-kind=Secret --bound-object-name=x
+if out="$(kubectl -n banlieue-system create token banlieue-operator --duration=1h 2>&1)"; then
+  pass "the policy binds only the bootstrap pods (cluster-admin mints as before)"
+else fail "the token policy's scope" "cluster-admin refused: $out"; fi
+expect_boot() { # want, description, can-i args...
+  local want=$1 what=$2 got; shift 2
+  got="$(kubectl auth can-i "$@" --as="$BOOT" 2>/dev/null || true)"
+  if [ "$got" = "$want" ]; then pass "$what: $want"; else fail "$what" "can-i says $got, want $want"; fi
+}
+expect_boot yes "the bootstrap pods mint tokens in banlieue's namespace" create serviceaccounts --subresource=token -n banlieue-system
+expect_boot no "the bootstrap pods read a Secret there" get secrets -n banlieue-system
+expect_boot no "the bootstrap pods read their own credentials" get secrets -n "$CREDS"
+expect_boot no "the bootstrap pods mint tokens elsewhere" create serviceaccounts --subresource=token -n "$CREDS"
+expect_can no "the controller mints a token" create serviceaccounts --subresource=token -n banlieue-system
+expect_can yes "the controller creates Providers" create providers.banlieue.io -n banlieue-system
 
 echo "--- a real Job and its pod"
 if out="$(kubectl create -f - "${AS[@]}" <<<"$GOOD" 2>&1)"; then

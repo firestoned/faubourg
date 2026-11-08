@@ -14,7 +14,7 @@ use faubourg_api::host::{
     BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, ScriptRef, ScriptSourceKind,
     SecretName, SshSpec,
 };
-use faubourg_controller::job::{BootstrapConfig, bootstrap_job};
+use faubourg_controller::job::{BootstrapConfig, ProviderConfig, bootstrap_job};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = std::env::var("FAUBOURG_BOOTSTRAP_IMAGE")
@@ -50,6 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: "faubourg-install".into(),
             key: DEFAULT_SCRIPT_KEY.into(),
         }),
+        provider: ProviderConfig {
+            class: "cloud-hypervisor".into(),
+            namespace: "banlieue-system".into(),
+            api_server: "https://kube.home.example:6443".into(),
+        },
     };
     let job = bootstrap_job(&host, &cfg)?;
     println!("{}", serde_json::to_string_pretty(&job)?);
