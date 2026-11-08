@@ -21,6 +21,7 @@ pub mod config;
 pub mod controller;
 pub mod health;
 pub mod job;
+pub mod leader;
 pub mod phase;
 pub mod plan;
 pub mod provider;

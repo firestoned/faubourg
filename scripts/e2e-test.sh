@@ -188,11 +188,29 @@ label_is() { # key value
   [ "$(kubectl -n "$BANLIEUE" get provider hv01 -o json | jq -r --arg k "$1" '.metadata.labels[$k] // ""')" = "$2" ]
 }
 
-controller_log() { kubectl -n faubourg-system logs deploy/faubourg-controller >"$WORK/controller.log" 2>&1 || true; }
+# Every replica's log: the leader's and the standby's (ADR-0014).
+controller_log() {
+  kubectl -n faubourg-system logs -l app.kubernetes.io/name=faubourg-controller --tail=-1 --prefix \
+    >"$WORK/controller.log" 2>&1 || true
+}
 
 echo "--- the controller, as the rendered Deployment (ADR-0012)"
 eventually "the controller Deployment is available" 180 kubectl -n faubourg-system wait \
   --for=condition=Available deploy/faubourg-controller --timeout=5s
+eventually "both replicas are ready (ADR-0014)" 120 bash -c \
+  "[ \"\$(kubectl -n faubourg-system get deploy faubourg-controller -o jsonpath='{.status.readyReplicas}')\" = 2 ]"
+leader_is_a_replica() {
+  local holder; holder="$(kubectl -n faubourg-system get lease faubourg-controller -o jsonpath='{.spec.holderIdentity}')"
+  [ -n "$holder" ] && [ "$(kubectl -n faubourg-system get pod "$holder" \
+    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/name}')" = faubourg-controller ]
+}
+eventually "one replica holds the leader Lease" 60 leader_is_a_replica
+standby_waits() { controller_log; grep -qF 'waiting to lead' "$WORK/controller.log"; }
+eventually "the other waits to lead" 30 standby_waits
+controller_log
+if [ "$(grep -cF 'starting the Host controller' "$WORK/controller.log")" -eq 1 ]; then
+  pass "only one runs the controller"
+else fail "the replicas" "$(grep -cF 'starting the Host controller' "$WORK/controller.log") of them run the controller"; fi
 if [ "$(kubectl -n faubourg-system get deploy faubourg-controller -o jsonpath='{.spec.template.spec.containers[0].image}')" = "$CONTROLLER_IMAGE" ]; then
   pass "it runs the rendered controller digest"
 else fail "the controller image" "not the rendered digest"; fi

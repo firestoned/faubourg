@@ -5,10 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-08**, against the architecture
-> defined by **ADR-0001 … ADR-0013** (all Accepted;
-> ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended). Ninth
-> pass, for ADR-0013: the install script's content is pinned by digest in A-8, the image
-> refuses any other, and a change rolls out one host at a time. The eighth pass closed R-3.
+> defined by **ADR-0001 … ADR-0014** (all Accepted;
+> ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended, ADR-0009
+> decision 1 superseded by ADR-0014). Tenth pass, for ADR-0014: the controller runs two
+> replicas and only the holder of a Lease acts. The ninth pinned the install script's content
+> (ADR-0013); the eighth closed R-3.
 > The shipped code is `crates/faubourg-api` (types, validation, the SSH
 > Secret contract, the Job-to-image contract), `crates/faubourg-controller` (the Host
 > reconciler and its binary) and `crates/faubourg-bootstrap` (the bootstrap image's binary, on
@@ -54,6 +55,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Provider token minting and the `faubourg-provider-tokens` policy (ADR-0011) | shipped, tested on kind | `crates/faubourg-bootstrap/src/provider.rs`, `deploy/admission/bootstrap-policy.yaml`, `scripts/vap-test.sh` |
 | Bootstrap image (SSH client) | shipped, tested against OpenSSH; released (ADR-0012) and run against a live host | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
 | Image publication and the install file (ADR-0012) | shipped in CI; v0.1.0 and v0.1.1 released and verified | `.github/workflows/build.yaml` (`images`, `release-manifests`), `images/`, `scripts/render-manifests.sh` |
+| Leader election (ADR-0014) | shipped, tested on kind with two controllers | `crates/faubourg-controller/src/{leader,main}.rs`, `deploy/rbac/controller.yaml`, `deploy/controller/deployment.yaml` |
 | Script pinning and the rollout (ADR-0013) | shipped, tested on kind and against OpenSSH | `crates/faubourg-api/src/policy.rs`, `crates/faubourg-controller/src/{plan,job}.rs`, `crates/faubourg-bootstrap/src/config.rs`, `deploy/admission/bootstrap-policy.yaml` |
 | Zone controller | planned, roadmap 02 | |
 
@@ -73,6 +75,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
 | A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
 | A-12 The published images and the install file | The bootstrap image is the fleet's root of trust; the install file decides which digest the admission policy admits (ADR-0012). |
+| A-13 The leader Lease (`faubourg-controller` in `faubourg-system`) | Its holder is the one replica that acts. Whoever can write it can stop every replica from acting, or hold it for a replica that does nothing. |
 
 ## 4. Actors
 
@@ -155,7 +158,10 @@ flowchart LR
 | A Host bootstraps into a missing or `Shared` zone | T | No Job until the zone exists and validates (`phase.rs`, `a_missing_zone_holds_a_host_that_has_not_started`; `controller-test`). |
 | A Host name longer than a label value is truncated into another host's label | T | The CRD refuses names over 63 characters (CEL rule in `deploy/crds/faubourg.firestoned.io_hosts.yaml`; `controller-test`), and the builder refuses them too. |
 | The controller starts with an image by tag, or with a malformed namespace or script source | T | It refuses to start (`config.rs`, `the_image_is_required_and_must_be_pinned`, `a_malformed_default_script_is_refused`; `controller-test`: "the controller refuses an image by tag"). An image other than A-8's is refused by the API server anyway. |
-| Two controller instances race and write conflicting state | T | `replicas: 1`, `Recreate` (`deploy/controller/deployment.yaml`). Every write is idempotent: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller` (a bootstrapped host's Provider spec under `faubourg.firestoned.io/host-provider-spec`). |
+| Two controller instances race and write conflicting state, or exceed the rollout's limit | T | Two replicas, of which only the holder of the Lease acts (ADR-0014). Acquiring and taking over are conditional writes, so of two candidates one wins (`leader.rs`, `claim`, `a_claim_is_conditional_and_counts_a_change_of_hands`), and the leader stops if it has not renewed within 10 seconds, before its 15-second lease can lapse, so a standby takes over only after it stopped (`hold`, `the_leader_stops_before_its_lease_can_run_out`; `controller-test`: "the second waits to lead", "and does nothing else", "the standby takes over"). This holds while clock skew between nodes stays under 5 seconds. Every write is idempotent too: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller` (a bootstrapped host's Provider spec under `faubourg.firestoned.io/host-provider-spec`). |
+| A partitioned or paused leader keeps acting after a standby took over | T | It exits when no renewal has succeeded within the deadline, and each renewal is cut off at the deadline, so a hung API call cannot hold it past it (`leader.rs`, `hold`). A leader that loses the Lease to another holder stops at once (`main.rs`). |
+| The controller's Lease is held or deleted to stop every replica | D | Writing it takes `update` on that Lease or `create` in `faubourg-system`, which only the controller and a cluster administrator hold; the controller cannot delete it (`deploy/rbac/controller.yaml`; `vap-test`: "delete the leader Lease: no", "write another Lease: no", "create a Lease elsewhere: no"). A replica that cannot lead waits; nothing on the hosts depends on it. |
+| A replica starts with no identity, or with another's, and takes the Lease as its own | S, T | It refuses to start without `POD_NAME` from the downward API, and never guesses one (`config.rs`, `the_controller_needs_a_well_formed_identity_to_elect`; `controller-test`). Pod names are unique in a namespace. |
 | A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
 | The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch`, `create`, `patch` on `providers.banlieue.io` only: no delete, no Secret, no `serviceaccounts/token` (`deploy/rbac/controller.yaml`; `vap-test` checks each). |
 | faubourg overwrites an adopted host's Provider, or deletes one | T, D | An adopted host's Provider gets labels only, by server-side apply, never its spec (`provider.rs`, `every_host_gets_labels_and_nothing_else_under_the_labels_manager`, `spec_body`; `controller-test` checks faubourg owns no spec field). The one exception moves a spec a v0.1 controller left under the labels' manager to the spec manager, with its values unchanged (`provider.rs`, `migrated_spec_body`, `nothing_moves_unless_the_labels_manager_owns_the_spec`). faubourg holds no delete on Providers and sets no ownerReference, so deleting a Host keeps its Provider (`controller-test`, `e2e-test`). |
@@ -306,10 +312,10 @@ flowchart LR
   created as `system:serviceaccount:kube-system:job-controller`. Without it the Pod rule
   refuses every bootstrap pod (fails closed). Verify on each distribution; verified live on
   k0s 1.36, with the flag set.
-- One controller replica, no leader election (ADR-0009 decision 1): an outage delays phase
-  updates and new bootstraps, and changes nothing on the hosts. It reconciles one Host at a
-  time, which keeps the rollout's count exact; leader election must keep only the leader
-  creating Jobs (ADR-0013).
+- Two controller replicas, one leader (ADR-0014). A dead leader is replaced in about 15
+  seconds, a stopping one in about 2. Clocks across nodes agree within 5 seconds (the lease
+  duration less the renew deadline); beyond that, two replicas could act briefly. The leader
+  reconciles one Host at a time, which keeps the rollout's count exact (ADR-0013).
 
 ## 10. Revision log
 
@@ -326,3 +332,4 @@ flowchart LR
 | 2026-11-08 | 0001 … 0012 | Pass for the ADR-0011 amendment found by the second live test (bootstrapping a fresh host from faubourg, which worked): a Host switched from `Script` to `None` could no longer label its Provider. The spec has its own field manager now. One TB-1 row added and one rewritten; no new boundary, asset, actor or permission (the controller's Role is unchanged). Header stamp bumped. R-3 is closed by roadmap 01's own pass. |
 | 2026-11-08 | 0001 … 0012 | Eighth pass, the full one roadmap 01 called for: **R-3 closed**. Every section walked against v0.1.1 and the live tests (adoption, then a bootstrap from nothing, on k0s and a real Cloud Hypervisor host). Header, components, A-2 and A-7 rewritten for what shipped; two TB-3 rows (another SSH front end on the address; a re-run reverting a host's local settings) and one TB-4 row (the archive's owner) added; R-11 and two assumptions confirmed live; R-13 added. No new boundary, actor or permission; the diagram is unchanged. |
 | 2026-11-08 | 0001 … 0013 | Ninth pass: ADR-0013 (the script's content pinned by digest, a change rolled out one host at a time, Accepted). The controller reads A-8 by name and nothing else; the policy admits only a pinned source, key and digest, exactly once; the image refuses any other content before connecting (exit 66). A-3, A-8, A-9 and two actors rewritten; TB-1 rows for in-place edits, a duplicated digest, the rollout, a forged halt and a forged status, and one TB-2 row; R-1 narrowed to two roles; the open "script content re-runs nothing" assumption removed. No new boundary; CALM gains A-8 as a data asset with its two relationships. |
+| 2026-11-08 | 0001 … 0014 | Tenth pass: ADR-0014 (leader election, Accepted), superseding ADR-0009 decision 1. A-13 (the Lease) and three TB-1 rows (a partitioned leader, a held or deleted Lease, a stolen identity) added; the "two instances race" row rewritten around the Lease; the one-replica assumption replaced by the clock-skew bound. The controller's RBAC gains one Lease in its own namespace; no new boundary or actor. |

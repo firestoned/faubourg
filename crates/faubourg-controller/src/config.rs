@@ -10,6 +10,7 @@ use faubourg_api::host::{DEFAULT_SCRIPT_KEY, ScriptRef, ScriptSourceKind};
 use faubourg_api::validation::{is_dns_label, is_dns_subdomain};
 
 use crate::job::{BootstrapConfig, ProviderConfig, is_digest_pinned};
+use crate::leader::Election;
 
 /// Flags, as the command line and the environment give them.
 #[derive(Clone, Debug, Parser)]
@@ -71,6 +72,17 @@ pub struct Args {
         default_value = "faubourg-bootstrap-policy"
     )]
     pub policy_name: String,
+    /// This replica's identity in the leader election: its pod name, from the downward API
+    /// (ADR-0014). Required: a guessed identity could match another replica's.
+    #[arg(long, env = "POD_NAME")]
+    pub identity: Option<String>,
+    /// The namespace of the leader Lease, `faubourg-controller`.
+    #[arg(
+        long,
+        env = "FAUBOURG_LEADER_ELECTION_NAMESPACE",
+        default_value = "faubourg-system"
+    )]
+    pub leader_election_namespace: String,
     /// At most this many re-bootstrap Jobs run at once, across the cluster (ADR-0013 decision 5).
     #[arg(long, env = "FAUBOURG_MAX_REBOOTSTRAPS", default_value_t = 1)]
     pub max_rebootstraps: u32,
@@ -83,6 +95,8 @@ pub struct Config {
     pub bootstrap: BootstrapConfig,
     /// Where the bootstrap policy's parameters are.
     pub policy: PolicyRef,
+    /// This replica in the leader election (ADR-0014).
+    pub election: Election,
 }
 
 /// The bootstrap policy's parameters `ConfigMap` (A-8).
@@ -115,6 +129,9 @@ pub enum ConfigError {
     /// The policy parameters' name is not a valid object name.
     #[error("--policy-name is not a valid name")]
     InvalidPolicyName,
+    /// No identity for the leader election, or one that is not a valid object name.
+    #[error("POD_NAME (--identity) must be set to this replica's pod name")]
+    NoIdentity,
     /// The rollout limit is zero.
     #[error("--max-rebootstraps must be at least 1")]
     InvalidMaxRebootstraps,
@@ -153,6 +170,13 @@ impl Args {
         if self.max_rebootstraps == 0 {
             return Err(ConfigError::InvalidMaxRebootstraps);
         }
+        if !is_dns_label(&self.leader_election_namespace) {
+            return Err(ConfigError::InvalidNamespace("leader-election-namespace"));
+        }
+        let identity = self
+            .identity
+            .filter(|i| is_dns_subdomain(i))
+            .ok_or(ConfigError::NoIdentity)?;
         let default_script = self
             .default_script
             .as_deref()
@@ -174,6 +198,10 @@ impl Args {
             policy: PolicyRef {
                 namespace: self.policy_namespace,
                 name: self.policy_name,
+            },
+            election: Election {
+                namespace: self.leader_election_namespace,
+                identity,
             },
         })
     }
@@ -230,6 +258,8 @@ mod tests {
     fn args(extra: &[&str]) -> Result<Args, clap::Error> {
         let mut v = vec![
             "faubourg-controller",
+            "--identity",
+            "faubourg-controller-7d9f-x2",
             "--bootstrap-image",
             IMAGE,
             "--provider-api-server",
@@ -255,6 +285,30 @@ mod tests {
         assert_eq!(c.policy.namespace, "faubourg-system");
         assert_eq!(c.policy.name, "faubourg-bootstrap-policy");
         assert_eq!(c.bootstrap.max_rebootstraps, 1);
+        assert_eq!(c.election.namespace, "faubourg-system");
+        assert_eq!(c.election.identity, "faubourg-controller-7d9f-x2");
+    }
+
+    #[test]
+    fn the_controller_needs_a_well_formed_identity_to_elect() {
+        let mut a = args(&[]).unwrap();
+        a.identity = None;
+        assert_eq!(
+            a.validate(),
+            Err(ConfigError::NoIdentity),
+            "never a guessed one"
+        );
+        for bad in ["", "Not A Pod", "-x"] {
+            let mut a = args(&[]).unwrap();
+            a.identity = Some(bad.into());
+            assert_eq!(a.validate(), Err(ConfigError::NoIdentity), "{bad:?}");
+        }
+        assert_eq!(
+            args(&["--leader-election-namespace", "Bad_Ns"])
+                .unwrap()
+                .validate(),
+            Err(ConfigError::InvalidNamespace("leader-election-namespace"))
+        );
     }
 
     #[test]
@@ -373,6 +427,8 @@ mod tests {
     fn with_api_server(url: &str) -> Args {
         Args::try_parse_from([
             "faubourg-controller",
+            "--identity",
+            "faubourg-controller-7d9f-x2",
             "--bootstrap-image",
             IMAGE,
             "--provider-api-server",
