@@ -20,7 +20,8 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] ADR-0012: both images built on every event, pushed, Cosign-signed, attested and Trivy-scanned from `main` and releases; a release ships one install file rendered with both digests and signed (`make release-manifests`); `make e2e-test` installs that file and runs the controller in the cluster
 - [x] Cut the first release (v0.1.0) and verify it as `docs/guides/installing.md` says
 - [x] Live test, stage 1: install v0.1.0 on a real k0s cluster and adopt a live host (labels, health, cordon); found the missing run-account provisioning (ADR-0010 amended)
-- [ ] Live test, stage 2: bootstrap that host from faubourg (placement, account, token), on a release with the amendment
+- [x] Live test, stage 2: bootstrap that host from faubourg (placement, account, token), on v0.1.1; found that the example install script never installed the provider binary (`--provider-binary`, fixed)
+- [ ] A Host switched from `Script` back to `None` keeps a valid Provider: faubourg force-owns `providerClassRef` and `connection.endpoint`, and a labels-only apply drops them
 - [ ] Leader election, before more than one replica
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
 - [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
