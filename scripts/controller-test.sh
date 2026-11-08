@@ -259,12 +259,15 @@ first="$(kubectl -n "$CREDS" get jobs -l "$REBOOT" -o jsonpath='{.items[0].metad
 other=hv08; [ "$first" = hv08 ] && other=hv09
 eventually "the other waits for a slot" 30 condition_is "$other" BootstrapCurrent False RolloutWaiting
 never "and only one runs" 5 more_than_one
-# The fixture host does not exist, so the re-bootstrap fails: the rollout halts.
-eventually "a failed re-bootstrap halts the rollout" 240 condition_is "$other" BootstrapCurrent False RolloutHalted
+# The bootstrap image here is pause, which never exits: fail the re-bootstrap by its deadline.
+first_job="$(kubectl -n "$CREDS" get jobs -l "$REBOOT,faubourg.firestoned.io/host=$first" -o name)"
+kubectl -n "$CREDS" patch "$first_job" --type=merge -p '{"spec": {"activeDeadlineSeconds": 1}}' >/dev/null
+eventually "a failed re-bootstrap halts the rollout" 60 condition_is "$other" BootstrapCurrent False RolloutHalted
 eventually "and the failed Host says so" 30 phase_is "$first" Failed
 kubectl -n "$CREDS" delete jobs -l "$REBOOT,faubourg.firestoned.io/host=$first" >/dev/null
-other_runs() { kubectl -n "$CREDS" get jobs -l "$REBOOT,faubourg.firestoned.io/host=$other" -o name | grep -q .; }
-eventually "deleting the failed Job lets the rollout go on" 60 other_runs
+# Either Host may take the freed slot: the one whose Job was deleted is still due too.
+not_halted() { rebootstraps_are 1 && ! condition_is "$other" BootstrapCurrent False RolloutHalted; }
+eventually "deleting the failed Job lets the rollout go on" 60 not_halted
 kubectl delete host hv08 hv09 >/dev/null
 
 echo "--- the ProviderClass must be External"

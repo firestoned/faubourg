@@ -29,7 +29,7 @@ use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY};
+use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY, LABEL_REBOOTSTRAP};
 use crate::plan::{NotPersisted, World, plan};
 use crate::provider;
 
@@ -86,6 +86,7 @@ pub async fn run(client: Client, cfg: Config) {
         .with_config(kube::runtime::controller::Config::default().concurrency(1));
     let hosts = controller.store();
     let every_host = hosts.clone();
+    let rollout_hosts = hosts.clone();
     let policy_name = format!("metadata.name={}", ctx.cfg.policy.name);
     let bootstrap_jobs = bootstrap_jobs();
     controller
@@ -94,7 +95,23 @@ pub async fn run(client: Client, cfg: Config) {
         .watches(
             ctx.jobs.clone(),
             watcher::Config::default().labels(&bootstrap_jobs),
-            |job: Job| owner_host(&job).map(|h| ObjectRef::new(&h)),
+            // A re-bootstrap taking, freeing or failing a slot concerns every Host waiting
+            // for one, not only its own (ADR-0013 decision 5).
+            move |job: Job| {
+                let mut refs: Vec<ObjectRef<Host>> = owner_host(&job)
+                    .map(|h| ObjectRef::new(&h))
+                    .into_iter()
+                    .collect();
+                if wakes_every_host(&job) {
+                    refs.extend(
+                        rollout_hosts
+                            .state()
+                            .into_iter()
+                            .map(|h| ObjectRef::from_obj(&*h)),
+                    );
+                }
+                refs
+            },
         )
         .watches(
             ctx.zones.clone(),
@@ -139,6 +156,15 @@ pub async fn run(client: Client, cfg: Config) {
             }
         })
         .await;
+}
+
+/// True for a re-bootstrap Job, whose every change can hold or release another Host.
+fn wakes_every_host(job: &Job) -> bool {
+    job.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(LABEL_REBOOTSTRAP))
+        .is_some_and(|v| v == "true")
 }
 
 /// The label selector of every Job the controller makes.
@@ -314,6 +340,30 @@ mod tests {
         assert_eq!(owner_host(&j).as_deref(), Some("hv01"));
         let r: ObjectRef<Host> = ObjectRef::new("hv01");
         assert_eq!(r.namespace, None, "a Host has no namespace");
+    }
+
+    #[test]
+    fn only_a_rebootstrap_job_wakes_every_host() {
+        let mut j = job(&json!([]));
+        assert!(
+            !wakes_every_host(&j),
+            "a first bootstrap concerns its own Host"
+        );
+        j.metadata.labels = Some(
+            [(LABEL_REBOOTSTRAP.to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            wakes_every_host(&j),
+            "a re-bootstrap starting, finishing, failing or going frees or takes a slot"
+        );
+        j.metadata.labels = Some(
+            [(LABEL_REBOOTSTRAP.to_string(), "false".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(!wakes_every_host(&j));
     }
 
     #[test]
