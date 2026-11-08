@@ -14,8 +14,17 @@ ENV RUSTUP_TOOLCHAIN=1.99.1 CARGO_TERM_COLOR=never
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY . .
-RUN cargo build --locked --release -p faubourg-bootstrap --bin faubourg-bootstrap \
- && install -m 0555 target/release/faubourg-bootstrap /faubourg-bootstrap
+# The registry and target/ are cache mounts: a rebuild compiles only what changed, and the
+# two images share their dependencies. Neither is in the image, and a fresh cache (as in a
+# release build) compiles everything, exactly as without them.
+# PROFILE is `release` for every shipped image; the integration tests pass `image-test`
+# (Cargo.toml), the same code without link-time optimization. Anything else is refused.
+ARG PROFILE=release
+RUN --mount=type=cache,id=faubourg-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=faubourg-target,target=/src/target,sharing=locked \
+    case "$PROFILE" in release|image-test) ;; *) echo "PROFILE must be release or image-test" >&2; exit 1 ;; esac \
+ && cargo build --locked --profile "$PROFILE" -p faubourg-bootstrap --bin faubourg-bootstrap \
+ && install -m 0555 "target/$PROFILE/faubourg-bootstrap" /faubourg-bootstrap
 
 FROM scratch
 COPY --from=build /faubourg-bootstrap /faubourg-bootstrap

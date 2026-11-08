@@ -46,11 +46,18 @@ Every CI job calls a Make target, so everything runs the same locally.
 | `make e2e-test` | A Host bootstrapped end to end in kind, installed as a release installs: both images pulled by digest from a local registry, the rendered install file applied, the controller running as its Deployment; an OpenSSH host as a pod; banlieue simulated with kubectl ([ADR-0011](adr/0011-the-hosts-provider-and-its-identity.md)). Needs kind, kubectl, jq, podman. Runs in CI. |
 | `make bootstrap-test` | The bootstrap image against a throwaway OpenSSH host, run the way a Job runs it (read-only, UID 65532, no capabilities). Needs podman, ssh-keygen, jq. Runs in CI. |
 | `make controller-test` | The Host controller binary, with its own ServiceAccount's token, against a throwaway kind cluster ([ADR-0009](adr/0009-host-reconciler.md)). Same tools as `vap-test`. Runs in CI. |
+| `make integration` | All four integration tests at once on one machine: `bootstrap-test` alongside, and `vap-test`, `controller-test` and `e2e-test` one after another on one shared kind cluster (they write the same cluster-wide objects, so they cannot share it at the same time). Each test's log is kept. CI runs them as separate parallel jobs instead. |
 | `make docs` | Build this site with `mkdocs build --strict`. Needs Poetry. |
 | `make docs-serve` | Serve this site with live reload on port 8000. |
 | `make dco-check` | Every commit since `origin/main` is signed off by its author. |
 | `make check-infra-identifiers` | No real host names or addresses in tracked files. |
 | `make help` | Everything else. |
+
+Image builds cache the cargo registry and `target/` (cache mounts), so a rebuild compiles only
+what changed. The integration tests build their images with `--build-arg PROFILE=image-test`
+(`Cargo.toml`): the release code without link-time optimization, which is most of a release
+build's time. Shipped images always build with `release`; the Containerfiles refuse any other
+profile.
 
 ## Continuous integration
 
