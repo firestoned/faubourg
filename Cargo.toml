@@ -76,3 +76,12 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Image builds for the integration tests only (`--build-arg PROFILE=image-test`): the release
+# code and settings without link-time optimization and with parallel codegen, so a rebuild
+# links in seconds instead of minutes. Shipped images always build with `release`.
+[profile.image-test]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true

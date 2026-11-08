@@ -17,12 +17,15 @@
 #   CT_CLUSTER   kind cluster name (default faubourg-ctl); deleted on exit
 #   CT_KEEP=1    keep the cluster afterwards
 #   CT_IMAGE     a real digest-pinned image for the bootstrap pods
+#   FAUBOURG_KIND_CLUSTER  use this existing kind cluster instead (`make integration`): it is
+#                          reset first and left in place
 #
 # Usage: scripts/controller-test.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER="${CT_CLUSTER:-faubourg-ctl}"
+SHARED="${FAUBOURG_KIND_CLUSTER:-}"
+CLUSTER="${SHARED:-${CT_CLUSTER:-faubourg-ctl}}"
 # pause 3.10: runs forever, so a Job stays Running. Any digest-pinned image works.
 IMAGE="${CT_IMAGE:-registry.k8s.io/pause@sha256:7c38f24774e3cbd906d2d33c38354ccf787635581c122965132c9bd309754d4a}"
 CREDS=faubourg-credentials
@@ -40,7 +43,9 @@ export KUBECONFIG="$WORK/admin.kubeconfig"
 CTL_PID=""
 cleanup() {
   if [ -n "$CTL_PID" ]; then kill "$CTL_PID" 2>/dev/null || true; wait "$CTL_PID" 2>/dev/null || true; fi
-  if [ "${CT_KEEP:-}" != 1 ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
+  if [ -z "$SHARED" ] && [ "${CT_KEEP:-}" != 1 ]; then
+    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -49,8 +54,14 @@ echo "controller-test: building"
 (cd "$ROOT" && cargo build -q -p faubourg-controller --bin faubourg-controller --example provider-crd)
 BIN="$ROOT/target/debug/faubourg-controller"
 
-echo "controller-test: creating kind cluster $CLUSTER"
-kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
+if [ -n "$SHARED" ]; then
+  echo "controller-test: using kind cluster $CLUSTER"
+  "$ROOT/scripts/kind-cluster.sh" reset "$CLUSTER" >/dev/null
+  kind get kubeconfig --name "$CLUSTER" >"$KUBECONFIG"
+else
+  echo "controller-test: creating kind cluster $CLUSTER"
+  kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
+fi
 kubectl version -o json | jq -r '"controller-test: server " + .serverVersion.gitVersion'
 
 kubectl apply -f "$ROOT/deploy/crds/" >/dev/null

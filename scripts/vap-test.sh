@@ -13,12 +13,15 @@
 #   VAP_CLUSTER   kind cluster name (default faubourg-vap); deleted on exit
 #   VAP_KEEP=1    keep the cluster afterwards
 #   VAP_IMAGE     a real digest-pinned image, used for the one pod that is really created
+#   FAUBOURG_KIND_CLUSTER  use this existing kind cluster instead (`make integration`): it is
+#                          reset first and left in place
 #
 # Usage: scripts/vap-test.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER="${VAP_CLUSTER:-faubourg-vap}"
+SHARED="${FAUBOURG_KIND_CLUSTER:-}"
+CLUSTER="${SHARED:-${VAP_CLUSTER:-faubourg-vap}}"
 # pause 3.10: tiny, runs as non-root, needs no command. Any digest-pinned image works.
 IMAGE="${VAP_IMAGE:-registry.k8s.io/pause@sha256:7c38f24774e3cbd906d2d33c38354ccf787635581c122965132c9bd309754d4a}"
 CREDS=faubourg-credentials
@@ -31,13 +34,21 @@ done
 WORK="$(mktemp -d)"
 export KUBECONFIG="$WORK/kubeconfig"
 cleanup() {
-  if [ "${VAP_KEEP:-}" != 1 ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
+  if [ -z "$SHARED" ] && [ "${VAP_KEEP:-}" != 1 ]; then
+    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-echo "vap-test: creating kind cluster $CLUSTER"
-kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
+if [ -n "$SHARED" ]; then
+  echo "vap-test: using kind cluster $CLUSTER"
+  "$ROOT/scripts/kind-cluster.sh" reset "$CLUSTER" >/dev/null
+  kind get kubeconfig --name "$CLUSTER" >"$KUBECONFIG"
+else
+  echo "vap-test: creating kind cluster $CLUSTER"
+  kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
+fi
 kubectl version -o json | jq -r '"vap-test: server " + .serverVersion.gitVersion'
 
 # The controller reads Providers in banlieue's namespace, which banlieue would create, with

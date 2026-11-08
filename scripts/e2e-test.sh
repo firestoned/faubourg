@@ -6,7 +6,8 @@
 # with every faubourg piece real and only banlieue simulated. It installs what a release
 # installs (ADR-0012 decision 9):
 #
-#   - both images, built here and pulled by digest from a local registry;
+#   - both images, built here from their Containerfiles (with the image-test profile: release
+#     code without link-time optimization) and pulled by digest from a local registry;
 #   - the install file `make release-manifests` renders from deploy/ with those digests:
 #     CRDs, RBAC, admission policies and parameters, and the controller Deployment, which runs
 #     the controller in the cluster under its own ServiceAccount;
@@ -21,12 +22,15 @@
 #
 #   E2E_CLUSTER   kind cluster name (default faubourg-e2e); deleted on exit
 #   E2E_KEEP=1    keep the cluster and registry afterwards
+#   FAUBOURG_KIND_CLUSTER  use this existing kind cluster instead (`make integration`): it is
+#                          reset first and left in place
 #
 # Usage: scripts/e2e-test.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER="${E2E_CLUSTER:-faubourg-e2e}"
+SHARED="${FAUBOURG_KIND_CLUSTER:-}"
+CLUSTER="${SHARED:-${E2E_CLUSTER:-faubourg-e2e}}"
 REG="${CLUSTER}-registry"
 REG_PORT="${E2E_REGISTRY_PORT:-5001}"
 CREDS=faubourg-credentials
@@ -44,7 +48,7 @@ WORK="$(mktemp -d)"
 export KUBECONFIG="$WORK/admin.kubeconfig"
 cleanup() {
   if [ "${E2E_KEEP:-}" != 1 ]; then
-    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    [ -n "$SHARED" ] || kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
     "$CTR" rm -f "$REG" >/dev/null 2>&1 || true
     rm -rf "$WORK"
   else
@@ -55,24 +59,22 @@ trap cleanup EXIT
 
 echo "e2e-test: building the controller and the images"
 (cd "$ROOT" && cargo build -q -p faubourg-controller --example provider-crd)
-"$CTR" build -q -f "$ROOT/images/bootstrap/Containerfile" -t localhost/faubourg-bootstrap:e2e "$ROOT" >/dev/null
-"$CTR" build -q -f "$ROOT/images/controller/Containerfile" -t localhost/faubourg-controller:e2e "$ROOT" >/dev/null
+"$CTR" build -q --build-arg PROFILE=image-test -f "$ROOT/images/bootstrap/Containerfile" -t localhost/faubourg-bootstrap:e2e "$ROOT" >/dev/null
+"$CTR" build -q --build-arg PROFILE=image-test -f "$ROOT/images/controller/Containerfile" -t localhost/faubourg-controller:e2e "$ROOT" >/dev/null
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/run"
 ssh-keygen -q -t ed25519 -N "" -C "" -f "$WORK/placement"
 mkdir -p "$WORK/sshd-ctx"
 cp "$WORK/run.pub" "$WORK/placement.pub" "$ROOT/test/sshd/Containerfile" "$WORK/sshd-ctx/"
 "$CTR" build -q -f "$WORK/sshd-ctx/Containerfile" -t localhost/faubourg-test-sshd:e2e "$WORK/sshd-ctx" >/dev/null
 
-echo "e2e-test: creating kind cluster $CLUSTER with a local registry"
-cat >"$WORK/kind.yaml" <<'EOF'
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-containerdConfigPatches:
-  - |-
-    [plugins."io.containerd.grpc.v1.cri".registry]
-      config_path = "/etc/containerd/certs.d"
-EOF
-kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --config "$WORK/kind.yaml" --wait 180s >/dev/null
+if [ -n "$SHARED" ]; then
+  echo "e2e-test: using kind cluster $CLUSTER, with a local registry"
+  "$ROOT/scripts/kind-cluster.sh" reset "$CLUSTER" >/dev/null
+else
+  echo "e2e-test: creating kind cluster $CLUSTER with a local registry"
+  "$ROOT/scripts/kind-cluster.sh" up "$CLUSTER" >/dev/null
+fi
+kind get kubeconfig --name "$CLUSTER" >"$KUBECONFIG"
 "$CTR" rm -f "$REG" >/dev/null 2>&1 || true
 "$CTR" run -d --name "$REG" --network kind -p "127.0.0.1:${REG_PORT}:5000" docker.io/library/registry:2 >/dev/null
 for node in $(kind get nodes --name "$CLUSTER"); do

@@ -4,7 +4,7 @@
 # All CI logic lives here (rules/github-workflows.md): workflows install tools
 # and call these targets, and every target runs identically locally.
 
-.PHONY: all help fmt fmt-check lint test deny check crds crds-check calm-validate calm-diagrams \
+.PHONY: all help fmt fmt-check lint test deny check crds crds-check calm-validate calm-diagrams integration \
 	ci-code-changed dco-check dco-check-test check-infra-identifiers check-infra-identifiers-test vap-test controller-test bootstrap-image bootstrap-test e2e-test \
 	controller-image release-manifests render-manifests-test \
 	docs docs-serve docs-clean
@@ -129,6 +129,11 @@ bootstrap-test: ## The bootstrap image against a real OpenSSH server (podman)
 
 e2e-test: ## A Host bootstrapped end to end in kind: real image, policies, controller; banlieue simulated
 	@scripts/e2e-test.sh
+
+# ----- Every integration test ------------------------------------------------
+
+integration: ## All four integration tests: bootstrap-test alongside, the kind tests on one shared cluster
+	@scripts/integration.sh
 
 # ----- Documentation (MkDocs Material) ---------------------------------------
 

@@ -38,7 +38,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "bootstrap-test: building the bootstrap image"
-podman build -q -f "$ROOT/images/bootstrap/Containerfile" -t "$IMG" "$ROOT" >/dev/null
+podman build -q --build-arg PROFILE=image-test -f "$ROOT/images/bootstrap/Containerfile" -t "$IMG" "$ROOT" >/dev/null
 
 # Throwaway keys. The credential volumes are made readable by the image's UID, which rootless
 # podman maps to a host UID other than ours.
