@@ -128,3 +128,21 @@ The obvious design, the controller requesting the token, fails on two counts:
   until then such a provider fails TLS and its Host stays `Bootstrapping`.
 - The default install script changes: it reads the bundle from stdin. A replaced script must
   do the same, or install the credential some other way.
+
+*Amended 2026-11-08, after the second live test (roadmap 01):* decisions 2 and 3 put the
+Provider's spec and its labels under one field manager. Server-side apply removes a field when
+the only manager that owned it stops sending it, so a Host switched from `Script` to `None`
+sent labels only, the API server refused a Provider with no `spec`, and the Host never
+reconciled again. faubourg now applies the Provider as two managers:
+
+- `faubourg.firestoned.io/host-provider-spec` owns `spec.providerClassRef` and
+  `spec.connection.endpoint`. It is applied first, and only for a `Script` Host.
+- `faubourg.firestoned.io/host-controller` owns the labels, for every Host, and nothing in
+  `spec`.
+
+A Host switched to `None` therefore keeps its Provider's spec as faubourg last set it: faubourg
+stops writing it, and does not remove it. A Provider whose spec the labels' manager still
+owns, as a v0.1 controller left it, is moved first: its current class and endpoint are applied,
+unchanged, under the spec manager, so the labels' apply that follows removes nothing. That is
+the only write faubourg makes to an adopted Provider's spec, and it changes no value.
+`controller-test` covers both.

@@ -30,9 +30,11 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY};
 use crate::plan::{NotPersisted, World, plan};
+use crate::provider;
 
-/// The field manager for everything the Host controller writes (ADR-0003, ADR-0009).
-pub const FIELD_MANAGER: &str = "faubourg.firestoned.io/host-controller";
+/// The field manager for everything the Host controller writes (ADR-0003, ADR-0009) but a
+/// bootstrapped Host's Provider spec, which has its own (ADR-0011, amended).
+pub const FIELD_MANAGER: &str = provider::LABELS_MANAGER;
 /// Re-read every Host this often even with no event, as a safety net.
 pub const RESYNC: Duration = Duration::from_secs(600);
 /// Retry a failed reconcile after this long.
@@ -166,7 +168,20 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         now: &now,
     })?;
 
-    // The Provider first: banlieue gives it its identity, and only then is a Job created.
+    // The Provider first: banlieue gives it its identity, and only then is a Job created. Its
+    // spec before its labels, so the labels' apply never leaves a field without a manager.
+    if let Some(body) = &p.apply_provider_spec {
+        ctx.providers
+            .patch(
+                &name,
+                &PatchParams::apply(provider::SPEC_MANAGER).force(),
+                &Patch::Apply(body),
+            )
+            .await?;
+        if own_provider.is_none() {
+            info!(host = %name, provider = %name, "created the host's Provider");
+        }
+    }
     if let Some(body) = &p.apply_provider {
         ctx.providers
             .patch(
@@ -175,9 +190,6 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 &Patch::Apply(body),
             )
             .await?;
-        if own_provider.is_none() {
-            info!(host = %name, provider = %name, "created the host's Provider");
-        }
     }
     for job in &p.delete {
         match ctx.jobs.delete(job, &DeleteParams::background()).await {

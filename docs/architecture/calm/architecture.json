@@ -343,7 +343,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Applies the host's Provider, named after the Host, by server-side apply under faubourg.firestoned.io/host-controller: class, endpoint, zone, host, cordon and zone labels for a bootstrapped host, labels only for an adopted one. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
+      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
       "relationship-type": {
         "connects": {
           "source": {
