@@ -152,10 +152,26 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         (None, None)
     };
 
-    let delete = stale(&owned, current);
+    // A Job that succeeded may be the only record of that success until the status, as read
+    // back, holds its inputs: deleting it sooner turns the next reconcile's re-bootstrap into
+    // a first bootstrap, which the rollout does not hold (ADR-0013 decision 5).
+    let recorded = host
+        .status
+        .as_ref()
+        .is_some_and(|s| s.bootstrapped_inputs.is_some());
+    let delete: Vec<String> = stale(&owned, current)
+        .into_iter()
+        .filter(|name| {
+            recorded
+                || !owned.iter().any(|j| {
+                    j.metadata.name.as_deref() == Some(name.as_str())
+                        && job_state(j, w.pods) == JobState::Succeeded
+                })
+        })
+        .collect();
 
-    // A stale Job holding the name the new one needs is deleted first; the new one is created
-    // on the next reconcile, which that deletion triggers.
+    // A Job holding the name the new one needs goes first (now, or once its success is
+    // recorded); the new one is created on a later reconcile, which that deletion triggers.
     let create = desired.filter(|d| {
         hold.is_none()
             && job == JobState::Absent
@@ -165,7 +181,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
             && d.metadata
                 .name
                 .as_deref()
-                .is_some_and(|n| !delete.iter().any(|x| x == n))
+                .is_some_and(|n| !owned.iter().any(|j| j.metadata.name.as_deref() == Some(n)))
     });
 
     let provider_ref = match w.providers {
@@ -1133,6 +1149,40 @@ mod tests {
             p.status.bootstrapped_inputs,
             job_inputs(&f.jobs[0]).map(str::to_string),
             "recorded before its old Job goes"
+        );
+    }
+
+    #[test]
+    fn the_last_success_is_kept_until_the_status_records_it() {
+        // As at an upgrade: the Host predates bootstrappedInputs, its inputs changed (here a
+        // re-pin) but not its generation, so its completed Job holds the new Job's name.
+        let old = Fixture::new(host(1));
+        let mut f = Fixture::new(host(1));
+        f.jobs = vec![job_for(&old.host, "j1", &["Complete"])];
+        f.pins.as_mut().unwrap()[0].sha256 = SCRIPT_SHA256.replace("fedc", "0123");
+        let p = f.plan();
+        assert!(
+            p.delete.is_empty(),
+            "the only record of the success stays until it is read back"
+        );
+        assert_eq!(p.create, None);
+        assert_eq!(
+            p.status.bootstrapped_inputs,
+            job_inputs(&f.jobs[0]).map(str::to_string)
+        );
+        // The next reconcile reads the record back: the old Job may go now.
+        f.host.status = Some(p.status);
+        assert_eq!(f.plan().delete, vec!["bootstrap-hv01-g1".to_string()]);
+        // And once it is gone, the new Job is a re-bootstrap, through the rollout.
+        f.jobs = vec![];
+        let job = f.plan().create.expect("a slot is free");
+        assert_eq!(
+            job.metadata
+                .labels
+                .unwrap()
+                .get(LABEL_REBOOTSTRAP)
+                .map(String::as_str),
+            Some("true")
         );
     }
 

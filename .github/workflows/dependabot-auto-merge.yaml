@@ -73,8 +73,16 @@ jobs:
     name: Build gate
     needs: [metadata]
     uses: ./.github/workflows/build.yaml
+    # A called workflow may only ask for what its caller grants, and build.yaml's image and
+    # release jobs ask for these (ADR-0012): with less, GitHub refuses this whole workflow at
+    # startup. Nothing is pushed or signed from here: build.yaml publishes only on main and
+    # releases, and a Dependabot pull request's token is read-only whatever is granted.
     permissions:
-      contents: read
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
 
   auto-merge:
     name: Enable auto-merge
