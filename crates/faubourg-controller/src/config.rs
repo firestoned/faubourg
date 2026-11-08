@@ -57,6 +57,23 @@ pub struct Args {
     /// The API server address the hosts' providers use, `https://...` (ADR-0011 decision 11).
     #[arg(long, env = "FAUBOURG_PROVIDER_API_SERVER")]
     pub provider_api_server: String,
+    /// The namespace of the bootstrap policy's parameters, which pin each script (ADR-0013).
+    #[arg(
+        long,
+        env = "FAUBOURG_POLICY_NAMESPACE",
+        default_value = "faubourg-system"
+    )]
+    pub policy_namespace: String,
+    /// The bootstrap policy's parameters: the one `ConfigMap` the controller reads.
+    #[arg(
+        long,
+        env = "FAUBOURG_POLICY_NAME",
+        default_value = "faubourg-bootstrap-policy"
+    )]
+    pub policy_name: String,
+    /// At most this many re-bootstrap Jobs run at once, across the cluster (ADR-0013 decision 5).
+    #[arg(long, env = "FAUBOURG_MAX_REBOOTSTRAPS", default_value_t = 1)]
+    pub max_rebootstraps: u32,
 }
 
 /// A validated configuration.
@@ -64,6 +81,17 @@ pub struct Args {
 pub struct Config {
     /// How bootstrap Jobs are built, and where the hosts' Providers live.
     pub bootstrap: BootstrapConfig,
+    /// Where the bootstrap policy's parameters are.
+    pub policy: PolicyRef,
+}
+
+/// The bootstrap policy's parameters `ConfigMap` (A-8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyRef {
+    /// Its namespace.
+    pub namespace: String,
+    /// Its name.
+    pub name: String,
 }
 
 /// Why the controller refuses to start.
@@ -84,6 +112,12 @@ pub enum ConfigError {
     /// The API server address is not an `https://` URL with a host.
     #[error("--provider-api-server must be an https:// URL")]
     InvalidApiServer,
+    /// The policy parameters' name is not a valid object name.
+    #[error("--policy-name is not a valid name")]
+    InvalidPolicyName,
+    /// The rollout limit is zero.
+    #[error("--max-rebootstraps must be at least 1")]
+    InvalidMaxRebootstraps,
     /// The default script is not `ConfigMap/<name>[:<key>]` or `Secret/<name>[:<key>]`.
     #[error("--default-script must be ConfigMap/<name>[:<key>] or Secret/<name>[:<key>]")]
     InvalidDefaultScript,
@@ -110,6 +144,15 @@ impl Args {
         if !is_https_url(&self.provider_api_server) {
             return Err(ConfigError::InvalidApiServer);
         }
+        if !is_dns_label(&self.policy_namespace) {
+            return Err(ConfigError::InvalidNamespace("policy-namespace"));
+        }
+        if !is_dns_subdomain(&self.policy_name) {
+            return Err(ConfigError::InvalidPolicyName);
+        }
+        if self.max_rebootstraps == 0 {
+            return Err(ConfigError::InvalidMaxRebootstraps);
+        }
         let default_script = self
             .default_script
             .as_deref()
@@ -126,6 +169,11 @@ impl Args {
                     namespace: self.provider_namespace,
                     api_server: self.provider_api_server,
                 },
+                max_rebootstraps: self.max_rebootstraps,
+            },
+            policy: PolicyRef {
+                namespace: self.policy_namespace,
+                name: self.policy_name,
             },
         })
     }
@@ -204,6 +252,33 @@ mod tests {
             c.bootstrap.provider.api_server,
             "https://kube.home.example:6443"
         );
+        assert_eq!(c.policy.namespace, "faubourg-system");
+        assert_eq!(c.policy.name, "faubourg-bootstrap-policy");
+        assert_eq!(c.bootstrap.max_rebootstraps, 1);
+    }
+
+    #[test]
+    fn the_policy_and_the_rollout_limit_are_checked() {
+        assert_eq!(
+            args(&["--policy-namespace", "Not_A_Label"])
+                .unwrap()
+                .validate(),
+            Err(ConfigError::InvalidNamespace("policy-namespace"))
+        );
+        assert_eq!(
+            args(&["--policy-name", "Not_Valid"]).unwrap().validate(),
+            Err(ConfigError::InvalidPolicyName)
+        );
+        assert_eq!(
+            args(&["--max-rebootstraps", "0"]).unwrap().validate(),
+            Err(ConfigError::InvalidMaxRebootstraps),
+            "zero would stop every re-bootstrap for good"
+        );
+        let c = args(&["--max-rebootstraps", "3"])
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(c.bootstrap.max_rebootstraps, 3);
     }
 
     #[test]

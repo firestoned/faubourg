@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use faubourg_api::bootstrap::{
     ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT, ENV_PROVIDER,
     ENV_PROVIDER_API_SERVER, ENV_PROVIDER_NAMESPACE, ENV_PROVIDER_SERVICE_ACCOUNT,
-    ENV_REVOKE_PLACEMENT, KUBE_API_CA_FILE, KUBE_API_TOKEN_FILE, MOUNT_CREDENTIALS, MOUNT_KUBE_API,
-    MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, is_fingerprint,
+    ENV_REVOKE_PLACEMENT, ENV_SCRIPT_SHA256, KUBE_API_CA_FILE, KUBE_API_TOKEN_FILE,
+    MOUNT_CREDENTIALS, MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, is_fingerprint,
 };
 use faubourg_api::validation::{is_dns_label, is_dns_subdomain};
 
@@ -117,6 +117,9 @@ pub enum ConfigError {
     /// The install script is empty.
     #[error("the install script is empty")]
     EmptyScript,
+    /// The mounted install script is not the one the bootstrap policy pins (ADR-0013).
+    #[error("the mounted install script is not the one pinned in the bootstrap policy")]
+    ScriptUnpinned,
 }
 
 impl Config {
@@ -164,6 +167,17 @@ impl Config {
             std::fs::read(&script_path).map_err(|_| ConfigError::Unreadable(script_path))?;
         if script.is_empty() {
             return Err(ConfigError::EmptyScript);
+        }
+        let pinned = need(ENV_SCRIPT_SHA256)?;
+        if pinned.len() != 64
+            || !pinned
+                .bytes()
+                .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(ConfigError::InvalidEnv(ENV_SCRIPT_SHA256));
+        }
+        if crate::sha256_hex(&script) != pinned {
+            return Err(ConfigError::ScriptUnpinned);
         }
         let provider = provider_inputs(&get, env, root)?;
         Ok(Self {
@@ -286,6 +300,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static N: AtomicUsize = AtomicUsize::new(0);
+    /// sha256 of the script `root()` mounts, `#!/bin/sh\n`.
+    const SCRIPT_SHA256: &str = "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf";
 
     /// A throwaway root with the run credential and the script mounted.
     fn root() -> PathBuf {
@@ -311,6 +327,7 @@ mod tests {
             (ENV_PORT, "22"),
             (ENV_HOST_KEY_POLICY, "Strict"),
             (ENV_REVOKE_PLACEMENT, "false"),
+            (ENV_SCRIPT_SHA256, SCRIPT_SHA256),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -368,6 +385,47 @@ mod tests {
     fn errors_never_carry_the_value() {
         let e = Config::load(&env(&[(ENV_ADDRESS, "-oProxyCommand=sh")]), &root()).unwrap_err();
         assert!(!e.to_string().contains("ProxyCommand"), "{e}");
+    }
+
+    #[test]
+    fn the_mounted_script_must_be_the_pinned_one() {
+        assert_eq!(crate::sha256_hex(b"#!/bin/sh\n"), SCRIPT_SHA256);
+        let other = "0".repeat(64);
+        assert!(matches!(
+            Config::load(&env(&[(ENV_SCRIPT_SHA256, &other)]), &root()),
+            Err(ConfigError::ScriptUnpinned)
+        ));
+        let r = root();
+        std::fs::write(
+            under(&r, MOUNT_SCRIPT).join(SCRIPT_FILE),
+            "#!/bin/sh\nevil\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(&env(&[]), &r),
+            Err(ConfigError::ScriptUnpinned)
+        ));
+    }
+
+    #[test]
+    fn the_pinned_digest_is_required_and_well_formed() {
+        assert!(matches!(
+            Config::load(&env(&[(ENV_SCRIPT_SHA256, "")]), &root()),
+            Err(ConfigError::MissingEnv(ENV_SCRIPT_SHA256))
+        ));
+        for bad in [
+            &SCRIPT_SHA256[..63],
+            &SCRIPT_SHA256.to_uppercase(),
+            "<digest>",
+        ] {
+            assert!(
+                matches!(
+                    Config::load(&env(&[(ENV_SCRIPT_SHA256, bad)]), &root()),
+                    Err(ConfigError::InvalidEnv(ENV_SCRIPT_SHA256))
+                ),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

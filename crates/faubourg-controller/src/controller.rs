@@ -13,11 +13,12 @@ use std::time::Duration;
 use banlieue_api::banlieue::{Provider, ProviderClass};
 use faubourg_api::LABEL_HOST;
 use faubourg_api::host::Host;
+use faubourg_api::policy::{PinnedScript, SCRIPT_SOURCES_KEY, parse_script_sources};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
@@ -28,7 +29,7 @@ use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY};
+use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY, LABEL_REBOOTSTRAP};
 use crate::plan::{NotPersisted, World, plan};
 use crate::provider;
 
@@ -61,6 +62,8 @@ struct Ctx {
     jobs: Api<Job>,
     pods: Api<Pod>,
     providers: Api<Provider>,
+    /// The bootstrap policy's parameters' namespace: read for the one `ConfigMap` (ADR-0013).
+    policy: Api<ConfigMap>,
     cfg: Config,
 }
 
@@ -74,21 +77,41 @@ pub async fn run(client: Client, cfg: Config) {
         jobs: Api::namespaced(client.clone(), &ns),
         pods: Api::namespaced(client.clone(), &ns),
         providers: Api::namespaced(client.clone(), &cfg.bootstrap.provider.namespace),
+        policy: Api::namespaced(client.clone(), &cfg.policy.namespace),
         cfg,
     });
-    let controller = Controller::new(ctx.hosts.clone(), watcher::Config::default());
+    // One reconcile at a time: the rollout counts re-bootstrap Jobs across Hosts, and two
+    // concurrent reconciles could each see the last free slot (ADR-0013 decision 5).
+    let controller = Controller::new(ctx.hosts.clone(), watcher::Config::default())
+        .with_config(kube::runtime::controller::Config::default().concurrency(1));
     let hosts = controller.store();
-    let bootstrap_jobs = format!(
-        "{LABEL_MANAGED_BY}={},{LABEL_COMPONENT}={CONTAINER}",
-        faubourg_api::PROJECT
-    );
+    let every_host = hosts.clone();
+    let rollout_hosts = hosts.clone();
+    let policy_name = format!("metadata.name={}", ctx.cfg.policy.name);
+    let bootstrap_jobs = bootstrap_jobs();
     controller
         // Not `owns`: it maps a Job to its owner in the Job's namespace, and a Host is
         // cluster-scoped, so every Job event would miss.
         .watches(
             ctx.jobs.clone(),
             watcher::Config::default().labels(&bootstrap_jobs),
-            |job: Job| owner_host(&job).map(|h| ObjectRef::new(&h)),
+            // A re-bootstrap taking, freeing or failing a slot concerns every Host waiting
+            // for one, not only its own (ADR-0013 decision 5).
+            move |job: Job| {
+                let mut refs: Vec<ObjectRef<Host>> = owner_host(&job)
+                    .map(|h| ObjectRef::new(&h))
+                    .into_iter()
+                    .collect();
+                if wakes_every_host(&job) {
+                    refs.extend(
+                        rollout_hosts
+                            .state()
+                            .into_iter()
+                            .map(|h| ObjectRef::from_obj(&*h)),
+                    );
+                }
+                refs
+            },
         )
         .watches(
             ctx.zones.clone(),
@@ -99,6 +122,18 @@ pub async fn run(client: Client, cfg: Config) {
                     .state()
                     .into_iter()
                     .filter(|h| h.spec.zone_ref == name)
+                    .map(|h| ObjectRef::from_obj(&*h))
+                    .collect::<Vec<_>>()
+            },
+        )
+        // A re-pin is a new bootstrap input for every Host using that script (ADR-0013).
+        .watches(
+            ctx.policy.clone(),
+            watcher::Config::default().fields(&policy_name),
+            move |_: ConfigMap| {
+                every_host
+                    .state()
+                    .into_iter()
                     .map(|h| ObjectRef::from_obj(&*h))
                     .collect::<Vec<_>>()
             },
@@ -121,6 +156,42 @@ pub async fn run(client: Client, cfg: Config) {
             }
         })
         .await;
+}
+
+/// True for a re-bootstrap Job, whose every change can hold or release another Host.
+fn wakes_every_host(job: &Job) -> bool {
+    job.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(LABEL_REBOOTSTRAP))
+        .is_some_and(|v| v == "true")
+}
+
+/// The label selector of every Job the controller makes.
+fn bootstrap_jobs() -> String {
+    format!(
+        "{LABEL_MANAGED_BY}={},{LABEL_COMPONENT}={CONTAINER}",
+        faubourg_api::PROJECT
+    )
+}
+
+/// The script pins in the bootstrap policy's parameters; `None` when they are missing or
+/// malformed, which fails every bootstrapped Host closed (ADR-0013 decision 2).
+fn pins(params: Option<ConfigMap>) -> Option<Vec<PinnedScript>> {
+    let Some(sources) = params
+        .and_then(|cm| cm.data)
+        .and_then(|mut d| d.remove(SCRIPT_SOURCES_KEY))
+    else {
+        warn!("the bootstrap policy's parameters have no scriptSources");
+        return None;
+    };
+    match parse_script_sources(&sources) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            warn!(error = %e, "the bootstrap policy's scriptSources is refused");
+            None
+        }
+    }
 }
 
 /// The Host controlling a Job, by name: a Host has no namespace.
@@ -147,6 +218,12 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         None
     };
     let jobs = ctx.jobs.list(&by_host).await?.items;
+    // Every bootstrap Job, for the rollout: how many re-bootstraps run, and whether one failed.
+    let fleet = ctx
+        .jobs
+        .list(&ListParams::default().labels(&bootstrap_jobs()))
+        .await?
+        .items;
     let pods = ctx.pods.list(&by_host).await?.items;
     let providers = ctx.providers.list(&by_host).await?.items;
     let own_provider = ctx.providers.get_opt(&name).await?;
@@ -154,6 +231,7 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         .classes
         .get_opt(&ctx.cfg.bootstrap.provider.class)
         .await?;
+    let pins = pins(ctx.policy.get_opt(&ctx.cfg.policy.name).await?);
     let now = Time(Timestamp::now());
 
     let p = plan(&World {
@@ -165,6 +243,8 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         own_provider: own_provider.as_ref(),
         class: class.as_ref(),
         cfg: &ctx.cfg.bootstrap,
+        pins: pins.as_deref(),
+        fleet: &fleet,
         now: &now,
     })?;
 
@@ -260,6 +340,30 @@ mod tests {
         assert_eq!(owner_host(&j).as_deref(), Some("hv01"));
         let r: ObjectRef<Host> = ObjectRef::new("hv01");
         assert_eq!(r.namespace, None, "a Host has no namespace");
+    }
+
+    #[test]
+    fn only_a_rebootstrap_job_wakes_every_host() {
+        let mut j = job(&json!([]));
+        assert!(
+            !wakes_every_host(&j),
+            "a first bootstrap concerns its own Host"
+        );
+        j.metadata.labels = Some(
+            [(LABEL_REBOOTSTRAP.to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            wakes_every_host(&j),
+            "a re-bootstrap starting, finishing, failing or going frees or takes a slot"
+        );
+        j.metadata.labels = Some(
+            [(LABEL_REBOOTSTRAP.to_string(), "false".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(!wakes_every_host(&j));
     }
 
     #[test]

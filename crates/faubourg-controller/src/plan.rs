@@ -18,6 +18,7 @@ use banlieue_api::banlieue::{Provider, ProviderClass};
 use faubourg_api::host::{
     BootstrapMethod, Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME,
 };
+use faubourg_api::policy::PinnedScript;
 use faubourg_api::zone::AvailabilityZone;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -25,8 +26,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
 use crate::health::ProviderHealth;
 use crate::job::{
-    BootstrapConfig, JobError, bootstrap_job, job_generation, job_inputs, job_state, owned_by,
-    reported_host_key,
+    BootstrapConfig, JobError, LABEL_REBOOTSTRAP, bootstrap_job, job_generation, job_inputs,
+    job_state, owned_by, reported_host_key,
 };
 use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
 use crate::provider::{
@@ -36,10 +37,22 @@ use crate::provider::{
 
 /// The Host condition the reconciler writes.
 pub const CONDITION_READY: &str = "Ready";
+/// The Host condition saying whether it runs its current bootstrap inputs (ADR-0013).
+pub const CONDITION_BOOTSTRAP_CURRENT: &str = "BootstrapCurrent";
+/// Reason: the last successful bootstrap was under the current inputs.
+pub const REASON_BOOTSTRAP_CURRENT: &str = "Current";
+/// Reason: the current inputs' Job has not succeeded yet.
+pub const REASON_BOOTSTRAP_PENDING: &str = "BootstrapPending";
+/// Reason: a re-bootstrap waits for a rollout slot.
+pub const REASON_ROLLOUT_WAITING: &str = "RolloutWaiting";
+/// Reason: another Host's re-bootstrap failed, so no re-bootstrap starts.
+pub const REASON_ROLLOUT_HALTED: &str = "RolloutHalted";
 /// Reason: neither the Host nor the controller names a script source.
 pub const REASON_NO_SCRIPT_SOURCE: &str = "NoScriptSource";
 /// Reason: the controller's bootstrap image is not pinned by digest.
 pub const REASON_IMAGE_NOT_PINNED: &str = "ImageNotPinned";
+/// Reason: the bootstrap policy pins no digest for the Host's script (ADR-0013 decision 2).
+pub const REASON_SCRIPT_NOT_PINNED: &str = "ScriptNotPinned";
 
 /// Everything one reconcile reads.
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +73,11 @@ pub struct World<'a> {
     pub class: Option<&'a ProviderClass>,
     /// The controller's configuration.
     pub cfg: &'a BootstrapConfig,
+    /// The script sources the bootstrap policy pins; `None` when its parameters are missing or
+    /// malformed (ADR-0013 decision 2).
+    pub pins: Option<&'a [PinnedScript]>,
+    /// Every bootstrap Job in the credentials namespace, for the rollout (ADR-0013 decision 5).
+    pub fleet: &'a [Job],
     /// The time to stamp on a condition that changes.
     pub now: &'a Time,
 }
@@ -98,66 +116,38 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
     let generation = host.metadata.generation.ok_or(NotPersisted("generation"))?;
 
     let owned: Vec<&Job> = w.jobs.iter().filter(|j| owned_by(j, uid)).collect();
-    let (desired, refusal) = match bootstrap_job(host, w.cfg) {
+    let (desired, refusal) = match bootstrap_job(host, w.cfg, w.pins) {
         Ok(job) => (Some(job), None),
         // The phase machine reports these itself.
         Err(JobError::NotScript | JobError::InvalidSpec(_)) => (None, None),
         Err(e) => (None, Some(refused(&e))),
     };
-    let want = desired.as_ref().and_then(job_inputs);
+    let want = desired.as_ref().and_then(job_inputs).map(str::to_string);
     let current = owned
         .iter()
         .copied()
-        .filter(|j| want.is_some() && job_inputs(j) == want)
+        .filter(|j| want.is_some() && job_inputs(j) == want.as_deref())
         .max_by_key(|j| job_generation(j));
     let job = current.map_or(JobState::Absent, |j| job_state(j, w.pods));
+    let Progress {
+        bootstrapped_inputs,
+        rebootstrap,
+        hold,
+    } = progress(w, uid, &owned, want.as_deref(), job);
     let accepted_host_key = accepted_host_key(host, current, job, w.pods);
     let zone = zone_state(w.zone);
-    let provider = ProviderHealth::of_labelled(w.providers);
-    let previous = host.status.as_ref().and_then(|s| s.phase);
-
     let script = host.spec.bootstrap.method == BootstrapMethod::Script;
     let valid = host.spec.validate().is_ok();
-    let external = class_is_external(w.class);
-    // A bootstrapped Host needs an External class before anything is created for it.
-    let refusal = refusal.or_else(|| {
-        (script && valid && !external).then(|| Decision {
-            phase: HostPhase::Failed,
-            reason: REASON_CLASS_NOT_EXTERNAL,
-            message: format!(
-                "ProviderClass {} is missing or not External",
-                w.cfg.provider.class
-            ),
-        })
-    });
     let identity = identity_ready(w.own_provider);
-    let mut decision = refusal.clone().unwrap_or_else(|| {
-        decide(&Observed {
-            spec: &host.spec,
-            previous,
-            zone,
-            job,
-            provider,
-        })
-    });
-    // No Job until banlieue's operator has given the Provider its identity (decision 2).
-    if script && decision.reason == REASON_AWAITING_JOB && !identity {
-        decision = Decision {
-            phase: HostPhase::Pending,
-            reason: REASON_AWAITING_IDENTITY,
-            message: "waiting for banlieue to give the host's Provider its identity".into(),
-        };
-    }
-    let ns = &w.cfg.provider.namespace;
-    let (apply_provider_spec, apply_provider) = if !valid || refusal.is_some() {
-        (None, None)
-    } else if script {
-        (
-            spec_body(host, &w.cfg.provider.class, ns),
-            labels_body(host, w.zone, ns),
-        )
-    } else if let Some(own) = w.own_provider {
-        (migrated_spec_body(own), labels_body(host, w.zone, ns))
+    // A held re-bootstrap keeps running what it has: judge it by its last success.
+    let judged = if hold.is_some() {
+        JobState::Succeeded
+    } else {
+        job
+    };
+    let (refusal, decision) = phase(w, refusal, judged, zone, identity);
+    let (apply_provider_spec, apply_provider) = if valid && refusal.is_none() {
+        provider_bodies(w, script)
     } else {
         (None, None)
     };
@@ -167,7 +157,8 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
     // A stale Job holding the name the new one needs is deleted first; the new one is created
     // on the next reconcile, which that deletion triggers.
     let create = desired.filter(|d| {
-        job == JobState::Absent
+        hold.is_none()
+            && job == JobState::Absent
             && zone == ZoneState::Supported
             && refusal.is_none()
             && identity
@@ -181,12 +172,26 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         [one] => one.metadata.name.clone(),
         _ => None,
     };
+    let create = create.map(|mut j| {
+        if rebootstrap {
+            j.metadata
+                .labels
+                .get_or_insert_default()
+                .insert(LABEL_REBOOTSTRAP.into(), "true".into());
+        }
+        j
+    });
+    let bootstrap = (script && want.is_some()).then_some(bootstrap_condition(job, hold));
     let status = status(
         host.status.as_ref(),
         &decision,
         generation,
-        provider_ref,
-        accepted_host_key,
+        Recorded {
+            provider_ref,
+            accepted_host_key,
+            bootstrapped_inputs,
+            bootstrap,
+        },
         w.now,
     );
     let status_changed = host.status.as_ref() != Some(&status);
@@ -254,6 +259,7 @@ fn refused(e: &JobError) -> Decision {
         JobError::NameTooLong => REASON_INVALID_NAME,
         JobError::NoScriptSource => REASON_NO_SCRIPT_SOURCE,
         JobError::ImageNotPinned => REASON_IMAGE_NOT_PINNED,
+        JobError::ScriptNotPinned(_) => REASON_SCRIPT_NOT_PINNED,
         // Not reachable from plan(), which checks these first or leaves them to decide().
         JobError::NotPersisted(_) | JobError::NotScript | JobError::InvalidSpec(_) => {
             "BootstrapRefused"
@@ -266,42 +272,244 @@ fn refused(e: &JobError) -> Decision {
     }
 }
 
+/// The refusal, if any, and the phase decision (ADR-0009, ADR-0011 decision 2).
+fn phase(
+    w: &World<'_>,
+    refusal: Option<Decision>,
+    job: JobState,
+    zone: ZoneState,
+    identity: bool,
+) -> (Option<Decision>, Decision) {
+    let host = w.host;
+    let script = host.spec.bootstrap.method == BootstrapMethod::Script;
+    let valid = host.spec.validate().is_ok();
+    // A bootstrapped Host needs an External class before anything is created for it.
+    let refusal = refusal.or_else(|| {
+        (script && valid && !class_is_external(w.class)).then(|| Decision {
+            phase: HostPhase::Failed,
+            reason: REASON_CLASS_NOT_EXTERNAL,
+            message: format!(
+                "ProviderClass {} is missing or not External",
+                w.cfg.provider.class
+            ),
+        })
+    });
+    let mut decision = refusal.clone().unwrap_or_else(|| {
+        decide(&Observed {
+            spec: &host.spec,
+            previous: host.status.as_ref().and_then(|s| s.phase),
+            zone,
+            job,
+            provider: ProviderHealth::of_labelled(w.providers),
+        })
+    });
+    // No Job until banlieue's operator has given the Provider its identity (decision 2).
+    if script && decision.reason == REASON_AWAITING_JOB && !identity {
+        decision = Decision {
+            phase: HostPhase::Pending,
+            reason: REASON_AWAITING_IDENTITY,
+            message: "waiting for banlieue to give the host's Provider its identity".into(),
+        };
+    }
+    (refusal, decision)
+}
+
+/// Where a Host is in its bootstraps (ADR-0013 decision 5).
+struct Progress {
+    /// What the status records as the last successful bootstrap's inputs.
+    bootstrapped_inputs: Option<String>,
+    /// The Host has bootstrapped before and its inputs changed since.
+    rebootstrap: bool,
+    /// Why its re-bootstrap may not start now, if it may not.
+    hold: Option<Hold>,
+}
+
+fn progress(
+    w: &World<'_>,
+    uid: &str,
+    owned: &[&Job],
+    want: Option<&str>,
+    job: JobState,
+) -> Progress {
+    // The last bootstrap that succeeded: recorded, or, for a Host bootstrapped before the
+    // record existed, its newest owned Job that completed.
+    let recorded = w
+        .host
+        .status
+        .as_ref()
+        .and_then(|s| s.bootstrapped_inputs.clone())
+        .or_else(|| {
+            owned
+                .iter()
+                .filter(|j| job_state(j, w.pods) == JobState::Succeeded)
+                .max_by_key(|j| job_generation(j))
+                .and_then(|j| job_inputs(j))
+                .map(str::to_string)
+        });
+    let rebootstrap = want.is_some() && recorded.is_some() && recorded.as_deref() != want;
+    let hold = (rebootstrap && job == JobState::Absent)
+        .then(|| rollout(w.fleet, uid, w.cfg.max_rebootstraps))
+        .flatten();
+    let bootstrapped_inputs = if job == JobState::Succeeded {
+        want.map(str::to_string)
+    } else {
+        recorded
+    };
+    Progress {
+        bootstrapped_inputs,
+        rebootstrap,
+        hold,
+    }
+}
+
+/// `BootstrapCurrent`: status, reason, message.
+fn bootstrap_condition(job: JobState, hold: Option<Hold>) -> (bool, &'static str, &'static str) {
+    match (job, hold) {
+        (JobState::Succeeded, _) => (
+            true,
+            REASON_BOOTSTRAP_CURRENT,
+            "the last bootstrap ran the current inputs",
+        ),
+        (_, Some(Hold::Waiting)) => (
+            false,
+            REASON_ROLLOUT_WAITING,
+            "waiting for a rollout slot to re-bootstrap",
+        ),
+        (_, Some(Hold::Halted)) => (
+            false,
+            REASON_ROLLOUT_HALTED,
+            "another host's re-bootstrap failed; the rollout is halted",
+        ),
+        (_, None) => (
+            false,
+            REASON_BOOTSTRAP_PENDING,
+            "the current inputs' bootstrap has not succeeded yet",
+        ),
+    }
+}
+
+/// The Provider's spec and labels bodies, for a Host that validates (ADR-0011, amended).
+fn provider_bodies(
+    w: &World<'_>,
+    script: bool,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let ns = &w.cfg.provider.namespace;
+    if script {
+        (
+            spec_body(w.host, &w.cfg.provider.class, ns),
+            labels_body(w.host, w.zone, ns),
+        )
+    } else if let Some(own) = w.own_provider {
+        (migrated_spec_body(own), labels_body(w.host, w.zone, ns))
+    } else {
+        (None, None)
+    }
+}
+
+/// Why a re-bootstrap is held (ADR-0013 decision 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    /// Every slot is taken.
+    Waiting,
+    /// Another Host's re-bootstrap failed.
+    Halted,
+}
+
+/// Whether a re-bootstrap may start now, from every bootstrap Job but this Host's own.
+fn rollout(fleet: &[Job], uid: &str, max: u32) -> Option<Hold> {
+    let others = fleet.iter().filter(|j| {
+        let marked = j
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(LABEL_REBOOTSTRAP));
+        !owned_by(j, uid) && marked.map(String::as_str) == Some("true")
+    });
+    let mut running = 0usize;
+    for j in others {
+        match job_state(j, &[]) {
+            JobState::Failed(_) => return Some(Hold::Halted),
+            JobState::Running => running += 1,
+            JobState::Succeeded | JobState::Absent => {}
+        }
+    }
+    (running >= usize::try_from(max).unwrap_or(usize::MAX)).then_some(Hold::Waiting)
+}
+
+/// What the status records besides the phase.
+struct Recorded {
+    provider_ref: Option<String>,
+    accepted_host_key: Option<String>,
+    bootstrapped_inputs: Option<String>,
+    /// `BootstrapCurrent`, for a bootstrapped Host: status, reason, message.
+    bootstrap: Option<(bool, &'static str, &'static str)>,
+}
+
 /// The status a decision makes. Fields the reconciler does not decide are carried over.
 fn status(
     previous: Option<&HostStatus>,
     d: &Decision,
     generation: i64,
-    provider_ref: Option<String>,
-    accepted_host_key: Option<String>,
+    r: Recorded,
     now: &Time,
 ) -> HostStatus {
-    let ready = if d.phase == HostPhase::Ready {
-        "True"
-    } else {
-        "False"
-    };
+    let mut conditions = vec![condition(
+        previous,
+        CONDITION_READY,
+        d.phase == HostPhase::Ready,
+        d.reason,
+        &d.message,
+        generation,
+        now,
+    )];
+    if let Some((current, reason, message)) = r.bootstrap {
+        conditions.push(condition(
+            previous,
+            CONDITION_BOOTSTRAP_CURRENT,
+            current,
+            reason,
+            message,
+            generation,
+            now,
+        ));
+    }
+    HostStatus {
+        phase: Some(d.phase),
+        provider_ref: r.provider_ref,
+        accepted_host_key: r.accepted_host_key,
+        bootstrapped_inputs: r.bootstrapped_inputs,
+        conditions,
+        observed_generation: Some(generation),
+        message: Some(d.message.clone()),
+    }
+}
+
+/// A condition whose transition time moves only when its status flips.
+fn condition(
+    previous: Option<&HostStatus>,
+    type_: &str,
+    status: bool,
+    reason: &str,
+    message: &str,
+    generation: i64,
+    now: &Time,
+) -> Condition {
+    let status = if status { "True" } else { "False" };
     let last = previous
         .into_iter()
         .flat_map(|s| s.conditions.iter())
-        .find(|c| c.type_ == CONDITION_READY);
+        .find(|c| c.type_ == type_);
     let last_transition_time = match last {
-        Some(c) if c.status == ready => c.last_transition_time.clone(),
+        Some(c) if c.status == status => c.last_transition_time.clone(),
         _ => now.clone(),
     };
-    HostStatus {
-        phase: Some(d.phase),
-        provider_ref,
-        accepted_host_key,
-        conditions: vec![Condition {
-            type_: CONDITION_READY.into(),
-            status: ready.into(),
-            reason: d.reason.into(),
-            message: d.message.clone(),
-            observed_generation: Some(generation),
-            last_transition_time,
-        }],
+    Condition {
+        type_: type_.into(),
+        status: status.into(),
+        reason: reason.into(),
+        message: message.into(),
         observed_generation: Some(generation),
-        message: Some(d.message.clone()),
+        last_transition_time,
     }
 }
 
@@ -339,7 +547,18 @@ mod tests {
                 namespace: "banlieue-system".into(),
                 api_server: "https://kube.home.example:6443".into(),
             },
+            max_rebootstraps: 1,
         }
+    }
+
+    const SCRIPT_SHA256: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    /// The default script, pinned as the bootstrap policy would (ADR-0013).
+    fn pins() -> Vec<PinnedScript> {
+        vec![PinnedScript {
+            source: cfg().default_script.unwrap(),
+            sha256: SCRIPT_SHA256.into(),
+        }]
     }
 
     fn host(generation: i64) -> Host {
@@ -392,7 +611,7 @@ mod tests {
 
     /// The Job the controller would have created for `h`, as the API server returns it.
     fn job_for(h: &Host, uid: &str, conditions: &[&str]) -> Job {
-        let mut j = bootstrap_job(h, &cfg()).unwrap();
+        let mut j = bootstrap_job(h, &cfg(), Some(&pins())).unwrap();
         j.metadata.uid = Some(uid.into());
         let mut v = serde_json::to_value(&j).unwrap();
         v["status"] = json!({
@@ -434,6 +653,8 @@ mod tests {
         own_provider: Option<Provider>,
         class: Option<ProviderClass>,
         cfg: BootstrapConfig,
+        pins: Option<Vec<PinnedScript>>,
+        fleet: Vec<Job>,
         now: Time,
     }
 
@@ -448,6 +669,8 @@ mod tests {
                 own_provider: Some(own(true)),
                 class: Some(class("External")),
                 cfg: cfg(),
+                pins: Some(pins()),
+                fleet: vec![],
                 now: at(1_000),
             }
         }
@@ -462,6 +685,8 @@ mod tests {
                 own_provider: self.own_provider.as_ref(),
                 class: self.class.as_ref(),
                 cfg: &self.cfg,
+                pins: self.pins.as_deref(),
+                fleet: &self.fleet,
                 now: &self.now,
             })
             .unwrap()
@@ -770,9 +995,190 @@ mod tests {
             own_provider: f.own_provider.as_ref(),
             class: f.class.as_ref(),
             cfg: &f.cfg,
+            pins: f.pins.as_deref(),
+            fleet: &f.fleet,
             now: &f.now,
         });
         assert_eq!(r, Err(NotPersisted("uid")));
+    }
+
+    // ----- pinned scripts (ADR-0013) -------------------------------------------------------
+
+    #[test]
+    fn an_unpinned_script_fails_the_host_and_creates_nothing() {
+        for pins in [None, Some(vec![])] {
+            let mut f = Fixture::new(host(1));
+            f.pins = pins.clone();
+            let p = f.plan();
+            assert_eq!(p.decision.phase, HostPhase::Failed, "{pins:?}");
+            assert_eq!(p.decision.reason, REASON_SCRIPT_NOT_PINNED);
+            assert_eq!(p.create, None);
+        }
+    }
+
+    #[test]
+    fn an_adopted_host_needs_no_pinned_script() {
+        let mut f = Fixture::new(adopted());
+        f.pins = None;
+        assert_ne!(f.plan().decision.reason, REASON_SCRIPT_NOT_PINNED);
+    }
+
+    // ----- the rollout (ADR-0013 decision 5) ---------------------------------------------
+
+    /// A Host that completed a bootstrap under other inputs, is Ready, and is due again.
+    fn due_again() -> Fixture {
+        let mut f = Fixture::new(host(2));
+        f.host.status = Some(HostStatus {
+            phase: Some(HostPhase::Ready),
+            bootstrapped_inputs: Some("0".repeat(64)),
+            ..HostStatus::default()
+        });
+        f.providers = vec![provider("hv01", true)];
+        f
+    }
+
+    /// Another Host's re-bootstrap Job, in the given state.
+    fn rebootstrap_of(other: &str, conditions: &[&str]) -> Job {
+        let mut h = host(1);
+        h.metadata.name = Some(other.into());
+        h.metadata.uid = Some(format!("uid-{other}"));
+        let mut j = job_for(&h, &format!("job-{other}"), conditions);
+        j.metadata
+            .labels
+            .get_or_insert_default()
+            .insert(LABEL_REBOOTSTRAP.into(), "true".into());
+        j
+    }
+
+    fn bootstrap_current(p: &Plan) -> Option<(&str, &str)> {
+        p.status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == CONDITION_BOOTSTRAP_CURRENT)
+            .map(|c| (c.status.as_str(), c.reason.as_str()))
+    }
+
+    #[test]
+    fn a_free_slot_runs_a_rebootstrap_and_marks_its_job() {
+        let p = due_again().plan();
+        let job = p.create.expect("a slot is free");
+        assert_eq!(
+            job.metadata
+                .labels
+                .unwrap()
+                .get(LABEL_REBOOTSTRAP)
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn a_rebootstrap_waits_for_a_slot_and_keeps_its_phase() {
+        let mut f = due_again();
+        f.fleet = vec![rebootstrap_of("hv02", &[])];
+        let p = f.plan();
+        assert_eq!(p.create, None);
+        assert_eq!(
+            p.decision.phase,
+            HostPhase::Ready,
+            "it keeps running what it has"
+        );
+        assert_eq!(
+            bootstrap_current(&p),
+            Some(("False", REASON_ROLLOUT_WAITING))
+        );
+        f.cfg.max_rebootstraps = 2;
+        assert!(f.plan().create.is_some(), "a second slot");
+        f.fleet = vec![rebootstrap_of("hv02", &["Complete"])];
+        f.cfg.max_rebootstraps = 1;
+        assert!(f.plan().create.is_some(), "a finished one holds no slot");
+    }
+
+    #[test]
+    fn a_failed_rebootstrap_halts_the_rollout() {
+        let mut f = due_again();
+        f.fleet = vec![rebootstrap_of("hv02", &["Failed"])];
+        f.cfg.max_rebootstraps = 5;
+        let p = f.plan();
+        assert_eq!(p.create, None);
+        assert_eq!(p.decision.phase, HostPhase::Ready);
+        assert_eq!(
+            bootstrap_current(&p),
+            Some(("False", REASON_ROLLOUT_HALTED))
+        );
+    }
+
+    #[test]
+    fn a_first_bootstrap_is_not_limited() {
+        let mut f = Fixture::new(host(1));
+        f.fleet = vec![
+            rebootstrap_of("hv02", &[]),
+            rebootstrap_of("hv03", &["Failed"]),
+        ];
+        let job = f.plan().create.expect("nothing to lose on a fresh host");
+        assert!(!job.metadata.labels.unwrap().contains_key(LABEL_REBOOTSTRAP));
+    }
+
+    #[test]
+    fn a_host_bootstrapped_before_this_version_counts_as_bootstrapped() {
+        // No recorded inputs, but it owns a Job that completed under other inputs.
+        let first = host(1);
+        let mut f = Fixture::new(host(2));
+        f.host.spec.address = "hv01b.home.example".into();
+        f.jobs = vec![job_for(&first, "j1", &["Complete"])];
+        f.fleet = vec![rebootstrap_of("hv02", &[])];
+        let p = f.plan();
+        assert_eq!(p.create, None, "held like any re-bootstrap");
+        assert_eq!(
+            p.status.bootstrapped_inputs,
+            job_inputs(&f.jobs[0]).map(str::to_string),
+            "recorded before its old Job goes"
+        );
+    }
+
+    #[test]
+    fn a_succeeded_job_records_its_inputs_and_the_bootstrap_is_current() {
+        let mut f = due_again();
+        let current = job_for(&f.host, "j2", &["Complete"]);
+        let want = job_inputs(&current).map(str::to_string);
+        f.jobs = vec![current];
+        let p = f.plan();
+        assert_eq!(p.status.bootstrapped_inputs, want);
+        assert_eq!(
+            bootstrap_current(&p),
+            Some(("True", REASON_BOOTSTRAP_CURRENT))
+        );
+        assert_eq!(
+            p.status.conditions[0].type_, CONDITION_READY,
+            "Ready stays first"
+        );
+    }
+
+    #[test]
+    fn a_running_or_failed_rebootstrap_is_not_current() {
+        let mut f = due_again();
+        f.jobs = vec![job_for(&f.host, "j2", &[])];
+        assert_eq!(
+            bootstrap_current(&f.plan()),
+            Some(("False", REASON_BOOTSTRAP_PENDING))
+        );
+        f.jobs = vec![job_for(&f.host, "j2", &["Failed"])];
+        let p = f.plan();
+        assert_eq!(
+            bootstrap_current(&p),
+            Some(("False", REASON_BOOTSTRAP_PENDING))
+        );
+        assert_eq!(
+            p.status.bootstrapped_inputs.as_deref(),
+            Some("0".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn an_adopted_host_has_no_bootstrap_condition() {
+        let mut f = Fixture::new(adopted());
+        f.providers = vec![provider("hv01", true)];
+        assert_eq!(bootstrap_current(&f.plan()), None);
     }
 
     // ----- first-use host keys (ADR-0010 decision 8) --------------------------------------

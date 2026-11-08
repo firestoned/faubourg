@@ -57,9 +57,19 @@ Edit the install file before applying it:
 
 - `FAUBOURG_PROVIDER_API_SERVER` in the controller Deployment: the `https://` address your hosts
   use to reach the API server. The controller refuses to start without it.
-- In `faubourg-bootstrap-policy` (namespace `faubourg-system`): `scriptSources`, the script
-  objects that may be mounted, and `apiAudiences`, your API server's token audiences. Leave
-  `image` alone: it is the bootstrap digest the controller uses too.
+- In `faubourg-bootstrap-policy` (namespace `faubourg-system`): `scriptSources`, the install
+  scripts a Job may run, each pinned by digest, and `apiAudiences`, your API server's token
+  audiences. Leave `image` alone: it is the bootstrap digest the controller uses too.
+
+  The shipped `scriptSources` is a placeholder that pins nothing, so no host bootstraps until
+  you pin your script ([ADR-0013](../adr/0013-script-content-pinned-and-rolled-out.md)). Pin
+  the sha256 of the exact file the script's ConfigMap is created from:
+
+  ```sh
+  echo "ConfigMap/faubourg-install/install.sh@sha256:$(sha256sum install.sh | cut -d' ' -f1)"
+  ```
+
+  Separate several sources with commas. A source and key appear once.
 
   The shipped `apiAudiences` is kubeadm's and kind's. k0s, for one, issues
   `https://kubernetes.default.svc`. Read yours from a short-lived token; if it is wrong, every

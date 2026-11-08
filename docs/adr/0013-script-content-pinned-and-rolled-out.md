@@ -89,9 +89,9 @@ once, with no second person involved and no stop when the first host fails.
   re-runs its install once, one at a time. The install is idempotent, and a host already
   carrying the pinned script only re-runs it.
 - The install file's `scriptSources` ships as a placeholder,
-  `ConfigMap/faubourg-install/install.sh@sha256:<digest>`, which matches no digest the image
-  will compute, so nothing bootstraps until the administrator pins the real script. The
-  installing guide shows how: the sha256 of the exact file the ConfigMap was created from.
+  `ConfigMap/faubourg-install/install.sh@sha256:<your-script-sha256>`, which is not a valid
+  pin, so nothing bootstraps until the administrator pins the real script. The installing
+  guide shows how: the sha256 of the exact file the ConfigMap was created from.
 - Rolling back is re-pinning the previous digest, with the previous content in the source:
   the same rollout, in the other direction.
 - The controller now reads one ConfigMap. ADR-0008's "no ConfigMap access" becomes "no

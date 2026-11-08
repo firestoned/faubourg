@@ -27,6 +27,7 @@ flowchart LR
     service-zone-controller["Zone controller (planned, roadmap 02)"]
     service-bootstrap-job["Bootstrap Job"]
     service-bootstrap-admission-policy["Bootstrap admission policy"]
+    data-asset-bootstrap-policy-params["Bootstrap policy parameters (A-8)"]
     data-asset-host-az-crs["Host and AvailabilityZone CRs"]
     data-asset-ssh-secret["Host SSH Secret"]
     system-banlieue["banlieue"]
@@ -64,6 +65,8 @@ flowchart LR
     actor-vm-consumer --> system-banlieue
     service-host-controller -->|HTTPS| ecosystem-kube-api
     ecosystem-kube-api --> service-bootstrap-admission-policy
+    service-bootstrap-admission-policy --> data-asset-bootstrap-policy-params
+    service-host-controller --> data-asset-bootstrap-policy-params
     service-zone-controller -->|HTTPS| ecosystem-kube-api
     service-bootstrap-job --> data-asset-ssh-secret
     service-bootstrap-job --> data-asset-install-script

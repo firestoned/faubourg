@@ -47,6 +47,14 @@ spec:
     - name: volumes
       expression: >-
         has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : []
+    # The digest the Job says its script has (ADR-0013). Exactly one entry, or none counts:
+    # with two, the container would see the last and this policy the first.
+    - name: scriptSha
+      expression: >-
+        has(variables.c.env)
+        && variables.c.env.filter(e, e.name == 'FAUBOURG_SCRIPT_SHA256').size() == 1
+        && has(variables.c.env.filter(e, e.name == 'FAUBOURG_SCRIPT_SHA256')[0].value)
+        ? variables.c.env.filter(e, e.name == 'FAUBOURG_SCRIPT_SHA256')[0].value : ''
   validations:
     - expression: "has(params.data) && 'image' in params.data && 'serviceAccountName' in params.data"
       message: "faubourg-bootstrap-policy must set image and serviceAccountName"
@@ -88,10 +96,19 @@ spec:
               && v.projected.sources.exists(s, has(s.configMap))))
       message: "the kube-api volume is a token of at most 600 seconds for the default audience, and the cluster CA"
     - expression: >-
-        variables.volumes.all(v, v.name != 'script'
-          || (has(v.secret) && has(v.secret.secretName) && ('Secret/' + v.secret.secretName) in variables.scripts)
-          || (has(v.configMap) && has(v.configMap.name) && ('ConfigMap/' + v.configMap.name) in variables.scripts))
-      message: "the script volume is a ConfigMap or Secret on the scriptSources allowlist"
+        variables.scripts.all(s,
+          s.matches('^(ConfigMap|Secret)/[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[-._a-zA-Z0-9]+@sha256:[0-9a-f]{64}$'))
+      message: "every scriptSources entry is pinned: <Kind>/<name>/<key>@sha256:<64 hex> (ADR-0013)"
+    - expression: >-
+        variables.scriptSha != ''
+        && variables.volumes.all(v, v.name != 'script'
+          || (has(v.secret) && has(v.secret.secretName) && has(v.secret.items) && v.secret.items.size() == 1
+              && ('Secret/' + v.secret.secretName + '/' + v.secret.items[0].key + '@sha256:' + variables.scriptSha)
+                 in variables.scripts)
+          || (has(v.configMap) && has(v.configMap.name) && has(v.configMap.items) && v.configMap.items.size() == 1
+              && ('ConfigMap/' + v.configMap.name + '/' + v.configMap.items[0].key + '@sha256:' + variables.scriptSha)
+                 in variables.scripts))
+      message: "the script volume mounts one key of a source pinned in scriptSources, and FAUBOURG_SCRIPT_SHA256 is that pin (ADR-0013)"
     - expression: >-
         (!has(variables.c.volumeMounts) || variables.c.volumeMounts.all(m, has(m.readOnly) && m.readOnly))
         && (!has(variables.c.volumeDevices) || variables.c.volumeDevices.size() == 0)

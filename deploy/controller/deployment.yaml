@@ -53,6 +53,10 @@ spec:
               value: ConfigMap/faubourg-install
             - name: FAUBOURG_PROVIDER_NAMESPACE
               value: banlieue-system
+            # At most this many re-bootstraps at once, across the cluster; a failed one halts
+            # the rollout (ADR-0013).
+            - name: FAUBOURG_MAX_REBOOTSTRAPS
+              value: "1"
             # The API server address the hosts' providers use, https:// (ADR-0011).
             - name: FAUBOURG_PROVIDER_API_SERVER
               value: "" # rendered from PROVIDER_API_SERVER, or set by the operator
