@@ -192,7 +192,10 @@ mod tests {
         .unwrap();
         assert_eq!(b["metadata"]["name"], "hv01");
         assert_eq!(b["metadata"]["namespace"], "banlieue-system");
-        assert!(b["metadata"].get("labels").is_none(), "labels are the other manager's");
+        assert!(
+            b["metadata"].get("labels").is_none(),
+            "labels are the other manager's"
+        );
         assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
         assert_eq!(
             b["spec"]["connection"]["endpoint"],
@@ -243,7 +246,10 @@ mod tests {
         assert_eq!(b["metadata"]["name"], "hv01");
         assert_eq!(b["metadata"]["namespace"], "banlieue-system");
         assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
-        assert_eq!(b["spec"]["connection"]["endpoint"], "ch://hv01.home.example");
+        assert_eq!(
+            b["spec"]["connection"]["endpoint"],
+            "ch://hv01.home.example"
+        );
         assert!(b["metadata"].get("labels").is_none());
     }
 
@@ -261,7 +267,11 @@ mod tests {
         ] {
             assert_eq!(migrated_spec_body(&managed(&entries)), None, "{entries}");
         }
-        assert_eq!(migrated_spec_body(&provider(&json!({}))), None, "no managedFields");
+        assert_eq!(
+            migrated_spec_body(&provider(&json!({}))),
+            None,
+            "no managedFields"
+        );
     }
 
     #[test]
