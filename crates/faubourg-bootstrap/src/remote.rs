@@ -36,6 +36,27 @@ chown 0:0 \"$t\"; chmod 0440 \"$t\"; \
 visudo -cf \"$t\" >/dev/null || { rm -f \"$t\"; exit 3; }; \
 mv -f \"$t\" /etc/sudoers.d/faubourg";
 
+/// Creates the scoped run account if it is missing and authorizes the run key for it
+/// (ADR-0010 decision 6, amended). Reads two lines on stdin: the account name and the run
+/// credential's public key (`<type> <blob>`). Both are checked again here, so a malformed line
+/// changes nothing. The account gets no password (`*`), so only a key can log in to it; any
+/// other line of the key's blob is replaced, every other key is kept.
+const PLACE_ACCOUNT_PROGRAM: &str = "set -eu; PATH=/usr/sbin:/usr/bin:/sbin:/bin; umask 077; \
+IFS= read -r u; IFS= read -r k; \
+case \"$u\" in \"\"|-*|*[!a-z0-9_-]*) exit 2 ;; esac; \
+case \"$k\" in \"ssh-ed25519 \"*|\"ecdsa-sha2-nistp256 \"*|\"ecdsa-sha2-nistp384 \"*|\"ecdsa-sha2-nistp521 \"*) ;; *) exit 2 ;; esac; \
+b=$(printf %s \"$k\" | awk \"{print \\$2}\"); [ -n \"$b\" ] || exit 2; \
+command -v useradd >/dev/null && command -v usermod >/dev/null || exit 4; \
+id \"$u\" >/dev/null 2>&1 || useradd --system --create-home --shell /bin/sh \"$u\"; \
+usermod -p \"*\" \"$u\"; \
+h=$(awk -F: -v u=\"$u\" \"\\$1 == u {print \\$6}\" /etc/passwd); [ -n \"$h\" ] && [ -d \"$h\" ] || exit 3; \
+g=$(id -gn \"$u\"); install -d -m 0700 -o \"$u\" -g \"$g\" \"$h/.ssh\"; \
+t=$(mktemp \"$h/.ssh/.authorized_keys.XXXXXX\"); \
+if [ -f \"$h/.ssh/authorized_keys\" ]; then \
+grep -vF -e \"$b\" \"$h/.ssh/authorized_keys\" > \"$t\" || [ $? -eq 1 ] || { rm -f \"$t\"; exit 3; }; fi; \
+printf \"%s\\n\" \"$k\" >> \"$t\"; chown \"$u:$g\" \"$t\"; chmod 0600 \"$t\"; \
+mv -f \"$t\" \"$h/.ssh/authorized_keys\"";
+
 /// Removes every `authorized_keys` line of the logged-in account holding the key blob read
 /// from stdin. A `grep` error leaves the file untouched.
 const REVOKE_PROGRAM: &str = "set -u; PATH=/usr/bin:/bin; f=\"$HOME/.ssh/authorized_keys\"; \
@@ -48,6 +69,16 @@ chmod 0600 \"$t\" && mv -f \"$t\" \"$f\"";
 /// The placement command for the script: as root directly, or through `sudo -n`.
 pub fn place_script(as_root: bool) -> String {
     privileged(as_root, PLACE_SCRIPT_PROGRAM)
+}
+
+/// The placement command for the scoped account and its key.
+pub fn place_account(as_root: bool) -> String {
+    privileged(as_root, PLACE_ACCOUNT_PROGRAM)
+}
+
+/// The account program's stdin: the run account's name and its public key, one line each.
+pub fn account_input(run_user: &str, public_key: &str) -> Vec<u8> {
+    format!("{run_user}\n{public_key}\n").into_bytes()
 }
 
 /// The placement command for the sudoers drop-in.
@@ -111,7 +142,12 @@ mod tests {
 
     #[test]
     fn programs_survive_single_quoting() {
-        for p in [PLACE_SCRIPT_PROGRAM, PLACE_SUDOERS_PROGRAM, REVOKE_PROGRAM] {
+        for p in [
+            PLACE_ACCOUNT_PROGRAM,
+            PLACE_SCRIPT_PROGRAM,
+            PLACE_SUDOERS_PROGRAM,
+            REVOKE_PROGRAM,
+        ] {
             assert!(!p.contains('\''), "{p}");
         }
         assert_eq!(CHECK.matches('\'').count(), 2);
@@ -160,6 +196,25 @@ mod tests {
         assert!(!in_place(0, b"", SUM));
         assert!(!in_place(0, b"0 0 755\n0 0 755\n", SUM));
         assert!(!in_place(0, &[0xff, 0xfe], SUM));
+    }
+
+    #[test]
+    fn the_account_program_checks_its_input_and_sets_no_password() {
+        assert!(place_account(false).starts_with("sudo -n sh -c '"));
+        for must in [
+            "*[!a-z0-9_-]*) exit 2",
+            "\"ssh-ed25519 \"*",
+            "useradd --system --create-home",
+            "usermod -p \"*\"",
+            "chmod 0600",
+            "install -d -m 0700",
+        ] {
+            assert!(PLACE_ACCOUNT_PROGRAM.contains(must), "{must}");
+        }
+        assert_eq!(
+            account_input("faubourg", "ssh-ed25519 AAAAblob"),
+            b"faubourg\nssh-ed25519 AAAAblob\n"
+        );
     }
 
     #[test]

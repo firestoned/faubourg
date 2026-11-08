@@ -162,6 +162,21 @@ on_host 'chmod 0755 /opt/faubourg/install.sh'
 bootstrap "a failing script fails the Job" 1 run-kh script-fail place-admin
 if grep -qF "failing on purpose" "$LAST_LOG"; then pass "with its output in the log"; else fail "the failing script's log" "$(tail -3 "$LAST_LOG")"; fi
 
+echo "--- a fresh host: no run account yet (ADR-0010 decision 6, amended)"
+fresh_host
+on_host 'userdel -r faubourg'
+bootstrap "without placement the run login is refused" 1 run-kh script-a
+bootstrap "placement creates the run account, then runs" 0 run-kh script-a place-admin
+RUN_BLOB="$(awk '{print $2}' "$WORK/run.pub")"
+if [ "$(on_host 'stat -c "%U %a" /home/faubourg/.ssh /home/faubourg/.ssh/authorized_keys' | tr '\n' ' ')" = "faubourg 700 faubourg 600 " ] \
+   && on_host "grep -qF '$RUN_BLOB' /home/faubourg/.ssh/authorized_keys"; then
+  pass "the run key is authorized, 0700 and 0600, owned by the account"
+else fail "the run account" "$(on_host 'ls -la /home/faubourg/.ssh 2>&1')"; fi
+if [ "$(on_host 'awk -F: "\$1 == \"faubourg\" {print \$2}" /etc/shadow')" = "*" ]; then
+  pass "the account has no password"
+else fail "the account's password" "not *"; fi
+bootstrap "the created account then runs without placement" 0 run-kh script-a
+
 echo "--- placement as root, and revoke"
 fresh_host
 bootstrap "placement as root, then revoke" 0 run-kh script-a place-root "" "" true

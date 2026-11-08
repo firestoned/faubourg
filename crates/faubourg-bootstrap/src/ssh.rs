@@ -274,4 +274,8 @@ impl Remote for Ssh {
     fn refused(&self, e: &SshError) -> bool {
         matches!(e, SshError::HostKeyRefused)
     }
+
+    fn auth_refused(&self, e: &SshError) -> bool {
+        matches!(e, SshError::AuthRefused(_))
+    }
 }

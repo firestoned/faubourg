@@ -22,8 +22,13 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 # ----- settings --------------------------------------------------------------------------
+# BANLIEUE_URL serves either the binary or banlieue's release tarball, which holds one
+# `banlieue` (on GitHub: .../releases/download/<version>/banlieue-linux-amd64.tar.gz).
+# BANLIEUE_SHA256 is the sha256 of exactly what BANLIEUE_URL serves.
+# banlieue's release binaries link glibc: the host is a glibc distribution (Debian, Ubuntu,
+# Fedora), not Alpine.
 BANLIEUE_VERSION="v0.0.0"
-BANLIEUE_URL="https://registry.internal:5000/artifactory/banlieue/${BANLIEUE_VERSION}/banlieue-x86_64-unknown-linux-musl"
+BANLIEUE_URL="https://registry.internal:5000/artifactory/banlieue/${BANLIEUE_VERSION}/banlieue-linux-amd64.tar.gz"
 BANLIEUE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 # Extra CA for the internal repository; empty to use the system store.
 CA_BUNDLE=""
@@ -79,18 +84,37 @@ command -v sha256sum >/dev/null 2>&1 || { echo "install.sh: sha256sum not found"
 
 install -d -o root -g root -m 0755 "$DEST_DIR"
 
-if [ ! -x "$DEST" ] || ! echo "${BANLIEUE_SHA256}  ${DEST}" | sha256sum -c - >/dev/null 2>&1; then
-    tmp="$(mktemp "${DEST_DIR}/.banlieue.XXXXXX")"
-    trap 'rm -f "$tmp"' EXIT
+# The verified source's sha256 is recorded beside the binary, so a rerun downloads nothing.
+MARK="${DEST}.source-sha256"
+if [ ! -x "$DEST" ] || [ "$(cat "$MARK" 2>/dev/null)" != "$BANLIEUE_SHA256" ]; then
+    work="$(mktemp -d "${DEST_DIR}/.banlieue.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
     set -- --fail --silent --show-error --location --proto '=https' --tlsv1.2
     [ -n "$CA_BUNDLE" ] && set -- "$@" --cacert "$CA_BUNDLE"
-    curl "$@" --output "$tmp" "$BANLIEUE_URL"
-    echo "${BANLIEUE_SHA256}  ${tmp}" | sha256sum -c - >/dev/null || {
+    curl "$@" --output "$work/download" "$BANLIEUE_URL"
+    # Verified before anything is unpacked.
+    echo "${BANLIEUE_SHA256}  ${work}/download" | sha256sum -c - >/dev/null || {
         echo "install.sh: sha256 mismatch for banlieue ${BANLIEUE_VERSION}" >&2
         exit 1
     }
-    chmod 0755 "$tmp"
-    mv -f "$tmp" "$DEST"
+    case "$BANLIEUE_URL" in
+        *.tar.gz | *.tgz)
+            mkdir "$work/x"
+            tar -xzf "$work/download" -C "$work/x"
+            src="$work/x/banlieue"
+            ;;
+        *) src="$work/download" ;;
+    esac
+    if [ ! -f "$src" ] || [ -L "$src" ]; then
+        echo "install.sh: no banlieue binary in ${BANLIEUE_URL##*/}" >&2
+        exit 1
+    fi
+    # Root owns what root runs: a tarball's owner (often a build user's UID) is never kept.
+    chown 0:0 "$src"
+    chmod 0755 "$src"
+    mv -f "$src" "$DEST"
+    printf '%s\n' "$BANLIEUE_SHA256" >"$MARK"
+    rm -rf "$work"
     trap - EXIT
 fi
 ln -sfn "$DEST" "${DEST_DIR}/banlieue"
