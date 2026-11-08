@@ -230,8 +230,8 @@ kubectl apply -f - >/dev/null <<JSON
   "bootstrap": {"method": "Script", "scriptRef": {"kind": "ConfigMap", "name": "faubourg-install", "key": "other.sh"}}}}
 JSON
 eventually "a source and key the policy does not pin fails the Host" 30 phase_is hv10 Failed ScriptNotPinned
-identity hv10
-never "and gets no Job" 5 job_exists bootstrap-hv10-g1
+never "and gets no Provider" 5 kubectl -n "$BANLIEUE" get provider hv10
+never "and no Job" 5 job_exists bootstrap-hv10-g1
 kubectl delete host hv10 >/dev/null
 
 echo "--- a re-pin rolls out one host at a time and halts at a failure (ADR-0013)"
