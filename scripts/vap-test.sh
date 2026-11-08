@@ -46,7 +46,10 @@ kubectl create namespace banlieue-system >/dev/null
 (cd "$ROOT" && cargo run -q -p faubourg-controller --example provider-crd) | kubectl apply -f - >/dev/null 2>&1
 kubectl wait --for=condition=Established crd/providers.banlieue.io --timeout=60s >/dev/null
 kubectl apply -f "$ROOT/deploy/rbac/controller.yaml" >/dev/null
-jq_image() { jq -c --arg img "$IMAGE" '.data.image = $img'; }
+# The script the fixture ConfigMap holds, pinned as an administrator would (ADR-0013).
+SCRIPT_SHA="$(printf '#!/bin/sh' | sha256sum | cut -d' ' -f1)"
+SOURCES="ConfigMap/faubourg-install/install.sh@sha256:$SCRIPT_SHA"
+jq_image() { jq -c --arg img "$IMAGE" --arg src "$SOURCES" '.data.image = $img | .data.scriptSources = $src'; }
 kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-policy-params.yaml" \
   | jq_image | kubectl apply -f - >/dev/null
 kubectl apply -f "$ROOT/deploy/admission/bootstrap-policy.yaml" >/dev/null
@@ -56,7 +59,7 @@ kubectl -n "$CREDS" create secret generic hv02-ssh --from-literal=username=faubo
 kubectl -n "$CREDS" create configmap faubourg-install --from-literal=install.sh='#!/bin/sh' >/dev/null
 kubectl -n "$CREDS" create configmap other-script --from-literal=install.sh='#!/bin/sh' >/dev/null
 
-GOOD="$(cd "$ROOT" && FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" cargo run -q -p faubourg-controller --example bootstrap-job | jq -c .)"
+GOOD="$(cd "$ROOT" && FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" FAUBOURG_SCRIPT_SOURCES="$SOURCES" cargo run -q -p faubourg-controller --example bootstrap-job | jq -c .)"
 # The fixture Host does not exist here; without its owner the garbage collector would delete
 # the Job that is really created.
 GOOD="$(jq -c 'del(.metadata.ownerReferences)' <<<"$GOOD")"
@@ -125,10 +128,41 @@ deny "a hostPath volume" "exactly the credentials" \
   "$(mut "$P.volumes += [{\"name\": \"host\", \"hostPath\": {\"path\": \"/\"}}]")" "${AS[@]}"
 deny "credentials from a ConfigMap" "are Secrets" \
   "$(mut "($P.volumes[] | select(.name == \"credentials\")) |= {name, configMap: {name: \"other-script\"}}")" "${AS[@]}"
-deny "a script not on the allowlist" "scriptSources allowlist" \
+deny "a script not on the allowlist" "pinned in scriptSources" \
   "$(mut "($P.volumes[] | select(.name == \"script\") | .configMap.name) = \"other-script\"")" "${AS[@]}"
-deny "another host's key as the script" "scriptSources allowlist" \
+deny "another host's key as the script" "pinned in scriptSources" \
   "$(mut "($P.volumes[] | select(.name == \"script\")) |= {name, secret: {secretName: \"hv02-ssh\"}}")" "${AS[@]}"
+echo "--- the pinned script (ADR-0013)"
+SH='(.spec.template.spec.containers[0].env[] | select(.name == "FAUBOURG_SCRIPT_SHA256"))'
+SV='(.spec.template.spec.volumes[] | select(.name == "script"))'
+deny "a digest the policy does not pin" "pinned in scriptSources" \
+  "$(mut "$SH.value = \"$(printf '0%.0s' $(seq 64))\"")" "${AS[@]}"
+deny "no pinned digest in the environment" "pinned in scriptSources" \
+  "$(mut "$C.env |= map(select(.name != \"FAUBOURG_SCRIPT_SHA256\"))")" "${AS[@]}"
+deny "a second digest after the pinned one (the container sees the last)" "pinned in scriptSources" \
+  "$(mut "$C.env += [{\"name\": \"FAUBOURG_SCRIPT_SHA256\", \"value\": \"$(printf '0%.0s' $(seq 64))\"}]")" "${AS[@]}"
+deny "another key of the pinned source" "pinned in scriptSources" \
+  "$(mut "$SV.configMap.items[0].key = \"other.sh\"")" "${AS[@]}"
+deny "two keys of the pinned source" "pinned in scriptSources" \
+  "$(mut "$SV.configMap.items += [{\"key\": \"other.sh\", \"path\": \"other.sh\"}]")" "${AS[@]}"
+deny "the whole source, no key named" "pinned in scriptSources" \
+  "$(mut "$SV.configMap |= del(.items)")" "${AS[@]}"
+params_sources() { # scriptSources value: apply it, then wait until the API server uses it
+  kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+    -p "{\"data\": {\"scriptSources\": \"$1\"}}" >/dev/null
+}
+params_sources "ConfigMap/faubourg-install"
+for _ in $(seq 1 30); do
+  if ! submit "$GOOD" "${AS[@]}" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+deny "a policy with an unpinned entry refuses every Job" "every scriptSources entry is pinned" "$GOOD" "${AS[@]}"
+params_sources "$SOURCES"
+for _ in $(seq 1 30); do
+  if submit "$GOOD" "${AS[@]}" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+admit "and the pinned entry admits it again" "$GOOD" "${AS[@]}"
 deny "a writable mount" "mounted read-only" "$(mut "$C.volumeMounts[0].readOnly = false")" "${AS[@]}"
 
 echo "--- the kube-api volume (ADR-0011)"
@@ -193,6 +227,10 @@ expect_can no "create a Pod" create pods -n "$CREDS"
 expect_can no "exec into a Pod" create pods/exec -n "$CREDS"
 expect_can no "add an ephemeral container" patch pods/ephemeralcontainers -n "$CREDS"
 expect_can no "read the script ConfigMap" get configmaps -n "$CREDS"
+expect_can yes "read the policy parameters (ADR-0013)" get configmaps/faubourg-bootstrap-policy -n faubourg-system
+expect_can yes "watch the policy parameters" watch configmaps/faubourg-bootstrap-policy -n faubourg-system
+expect_can no "read another ConfigMap there" get configmaps/other -n faubourg-system
+expect_can no "list every ConfigMap there" list configmaps -n faubourg-system
 expect_can no "change the policy parameters" update configmaps/faubourg-bootstrap-policy -n faubourg-system
 expect_can no "change the policy" patch validatingadmissionpolicies.admissionregistration.k8s.io
 expect_can no "change the binding" delete validatingadmissionpolicybindings.admissionregistration.k8s.io

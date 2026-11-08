@@ -4,21 +4,27 @@
 //! Prints, as JSON, the bootstrap Job the builder makes for a fixture Host, so
 //! `scripts/vap-test.sh` can submit the controller's real output to a real API server.
 //!
-//! Usage: `FAUBOURG_BOOTSTRAP_IMAGE=<image@sha256:...> cargo run -q -p faubourg-controller
-//! --example bootstrap-job`
+//! Usage: `FAUBOURG_BOOTSTRAP_IMAGE=<image@sha256:...> FAUBOURG_SCRIPT_SOURCES=<scriptSources>
+//! cargo run -q -p faubourg-controller --example bootstrap-job`
 //!
-//! The image comes from the environment, not from `argv`. The builder refuses it unless it is
-//! pinned by digest, so nothing here trusts the value.
+//! The image and the script pins (the bootstrap policy's `scriptSources`, ADR-0013) come from
+//! the environment, not from `argv`. The builder refuses an image not pinned by digest and a
+//! script with no pinned digest, so nothing here trusts either value.
 
 use faubourg_api::host::{
     BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, ScriptRef, ScriptSourceKind,
     SecretName, SshSpec,
 };
+use faubourg_api::policy::parse_script_sources;
 use faubourg_controller::job::{BootstrapConfig, ProviderConfig, bootstrap_job};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = std::env::var("FAUBOURG_BOOTSTRAP_IMAGE")
         .map_err(|_| "set FAUBOURG_BOOTSTRAP_IMAGE to an image pinned by digest")?;
+    let pins = parse_script_sources(
+        &std::env::var("FAUBOURG_SCRIPT_SOURCES")
+            .map_err(|_| "set FAUBOURG_SCRIPT_SOURCES to the policy's scriptSources")?,
+    )?;
     let mut host = Host::new(
         "hv01",
         HostSpec {
@@ -55,8 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             namespace: "banlieue-system".into(),
             api_server: "https://kube.home.example:6443".into(),
         },
+        max_rebootstraps: 1,
     };
-    let job = bootstrap_job(&host, &cfg)?;
+    let job = bootstrap_job(&host, &cfg, Some(&pins)).map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&job)?);
     Ok(())
 }

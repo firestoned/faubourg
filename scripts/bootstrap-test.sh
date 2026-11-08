@@ -101,10 +101,13 @@ pass() { echo "ok   $1"; }
 fail() { echo "FAIL $1: $2"; failures=$((failures + 1)); }
 
 # bootstrap name, want-exit, run-cred, script, [placement-cred], [policy], [accepted], [revoke]
+# The pinned digest is the mounted script's own, as the bootstrap policy would have it
+# (ADR-0013), unless PIN overrides it.
 LAST_LOG=""; LAST_REPORT=""
 bootstrap() {
   local name=$1 want=$2 run=$3 scr=$4 place=${5:-} policy=${6:-Strict} accepted=${7:-} revoke=${8:-false}
   local term="$WORK/term-$RANDOM" log="$WORK/log-$RANDOM" got=0
+  local pin=${PIN:-$(sha256sum "$WORK/$scr/install.sh" | cut -d' ' -f1)}
   : >"$term"; chmod 0666 "$term"
   local args=(--rm --network "$NET" --read-only --user 65532:65532 --cap-drop ALL
     --security-opt no-new-privileges
@@ -112,7 +115,8 @@ bootstrap() {
     -v "$WORK/$scr:/var/run/faubourg/script:ro"
     -v "$term:/dev/termination-log"
     -e FAUBOURG_HOST=hv01 -e FAUBOURG_ADDRESS=sshd -e FAUBOURG_PORT=22
-    -e FAUBOURG_HOST_KEY_POLICY="$policy" -e FAUBOURG_REVOKE_PLACEMENT="$revoke")
+    -e FAUBOURG_HOST_KEY_POLICY="$policy" -e FAUBOURG_REVOKE_PLACEMENT="$revoke"
+    -e FAUBOURG_SCRIPT_SHA256="$pin")
   [ -n "$place" ] && args+=(-v "$WORK/$place:/var/run/faubourg/placement:ro")
   [ -n "$accepted" ] && args+=(-e FAUBOURG_ACCEPTED_HOST_KEY="$accepted")
   podman run "${args[@]}" "$IMG" >"$log" 2>&1 || got=$?
@@ -130,6 +134,18 @@ else fail "the image user" "$(podman image inspect "$IMG" --format '{{.Config.Us
 if podman run --rm --entrypoint /bin/sh "$IMG" -c true >/dev/null 2>&1; then
   fail "the image" "has a shell"
 else pass "the image has no shell"; fi
+
+echo "--- the pinned script (ADR-0013)"
+PIN="$(sha256sum "$WORK/script-a/install.sh" | cut -d' ' -f1)" \
+  bootstrap "a script edited without a re-pin is refused" 66 run-kh script-b place-admin
+if grep -qiE 'host key|connect' "$LAST_LOG"; then
+  fail "the unpinned script" "the image reached the host: $(grep -iE 'host key|connect' "$LAST_LOG" | head -2)"
+else pass "and nothing was connected to"; fi
+if grep -qF 'not the one pinned' "$LAST_LOG"; then pass "and it says why"
+else fail "the unpinned script" "no reason in the log: $(tail -3 "$LAST_LOG")"; fi
+if on_host 'test -e /opt/faubourg/install.sh'; then
+  fail "the unpinned script" "something was placed"
+else pass "and nothing was placed"; fi
 
 echo "--- host keys"
 bootstrap "Strict without knownHosts refuses every key" 65 run-nokh script-a

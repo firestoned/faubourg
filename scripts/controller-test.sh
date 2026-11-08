@@ -58,8 +58,12 @@ kubectl apply -f "$ROOT/deploy/crds/" >/dev/null
 kubectl wait --for=condition=Established crd --all --timeout=60s >/dev/null
 kubectl create namespace "$BANLIEUE" >/dev/null
 kubectl apply -f "$ROOT/deploy/rbac/controller.yaml" >/dev/null
+# The fixture script, pinned as an administrator would (ADR-0013).
+SCRIPT_SHA="$(printf '#!/bin/sh' | sha256sum | cut -d' ' -f1)"
+SOURCES="ConfigMap/faubourg-install/install.sh@sha256:$SCRIPT_SHA"
 kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-policy-params.yaml" \
-  | jq -c --arg img "$IMAGE" '.data.image = $img' | kubectl apply -f - >/dev/null
+  | jq -c --arg img "$IMAGE" --arg src "$SOURCES" '.data.image = $img | .data.scriptSources = $src' \
+  | kubectl apply -f - >/dev/null
 kubectl apply -f "$ROOT/deploy/admission/bootstrap-policy.yaml" >/dev/null
 kubectl -n "$CREDS" create secret generic hv01-ssh --from-literal=username=faubourg >/dev/null
 kubectl -n "$CREDS" create configmap faubourg-install --from-literal=install.sh='#!/bin/sh' >/dev/null
@@ -217,6 +221,51 @@ if grep -F 'reconcile failed' "$WORK/controller.log" | grep -q 'hv0[67]'; then
   fail "the switched Hosts" "$(grep -F 'reconcile failed' "$WORK/controller.log" | grep 'hv0[67]' | head -2)"
 else pass "and neither reconcile failed"; fi
 kubectl delete host hv06 hv07 >/dev/null
+
+echo "--- an unpinned script gets no Job (ADR-0013)"
+kubectl apply -f - >/dev/null <<JSON
+{"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "Host", "metadata": {"name": "hv10"},
+ "spec": {"zoneRef": "az1", "address": "hv10.home.example",
+  "ssh": {"port": 22, "secretRef": {"name": "hv01-ssh"}},
+  "bootstrap": {"method": "Script", "scriptRef": {"kind": "ConfigMap", "name": "faubourg-install", "key": "other.sh"}}}}
+JSON
+eventually "a source and key the policy does not pin fails the Host" 30 phase_is hv10 Failed ScriptNotPinned
+identity hv10
+never "and gets no Job" 5 job_exists bootstrap-hv10-g1
+kubectl delete host hv10 >/dev/null
+
+echo "--- a re-pin rolls out one host at a time and halts at a failure (ADR-0013)"
+bootstrapped() { # host: as if a bootstrap under other inputs had succeeded
+  kubectl patch host "$1" --subresource=status --type=merge \
+    -p "{\"status\": {\"bootstrappedInputs\": \"$(printf '0%.0s' $(seq 64))\"}}" >/dev/null
+}
+condition_is() { # host, type, status, reason
+  kubectl get host "$1" -o json | jq -e --arg t "$2" --arg s "$3" --arg r "$4" \
+    '.status.conditions // [] | any(.type == $t and .status == $s and .reason == $r)'
+}
+REBOOT=faubourg.firestoned.io/rebootstrap=true
+rebootstraps_are() { # count
+  [ "$(kubectl -n "$CREDS" get jobs -l "$REBOOT" -o name | wc -l)" -eq "$1" ]
+}
+more_than_one() { ! rebootstraps_are 0 && ! rebootstraps_are 1; }
+for h in hv08 hv09; do
+  host "$h" az1 "$h.home.example" Script
+  eventually "$h waits for its Provider's identity" 60 phase_is "$h" Pending AwaitingProviderIdentity
+  bootstrapped "$h"
+done
+identity hv08; identity hv09
+eventually "one re-bootstrap starts" 60 rebootstraps_are 1
+first="$(kubectl -n "$CREDS" get jobs -l "$REBOOT" -o jsonpath='{.items[0].metadata.labels.faubourg\.firestoned\.io/host}')"
+other=hv08; [ "$first" = hv08 ] && other=hv09
+eventually "the other waits for a slot" 30 condition_is "$other" BootstrapCurrent False RolloutWaiting
+never "and only one runs" 5 more_than_one
+# The fixture host does not exist, so the re-bootstrap fails: the rollout halts.
+eventually "a failed re-bootstrap halts the rollout" 240 condition_is "$other" BootstrapCurrent False RolloutHalted
+eventually "and the failed Host says so" 30 phase_is "$first" Failed
+kubectl -n "$CREDS" delete jobs -l "$REBOOT,faubourg.firestoned.io/host=$first" >/dev/null
+other_runs() { kubectl -n "$CREDS" get jobs -l "$REBOOT,faubourg.firestoned.io/host=$other" -o name | grep -q .; }
+eventually "deleting the failed Job lets the rollout go on" 60 other_runs
+kubectl delete host hv08 hv09 >/dev/null
 
 echo "--- the ProviderClass must be External"
 kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "Managed"}}' >/dev/null

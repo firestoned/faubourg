@@ -62,17 +62,27 @@ kubectl -n faubourg-credentials create configmap faubourg-install \
   --from-file=install.sh=examples/host/install.sh --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-The admission policy only lets a Job mount a script source that is on its allowlist
-([ADR-0008](../adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)), so add it to the
-`scriptSources` key of the `faubourg-bootstrap-policy` ConfigMap in `faubourg-system`, for
-example `ConfigMap/faubourg-install`. That ConfigMap is a platform administrator's to edit,
-not the script maintainer's.
+A Job runs only a script whose content is pinned
+([ADR-0013](../adr/0013-script-content-pinned-and-rolled-out.md)). The platform administrator
+pins it in the `scriptSources` key of the `faubourg-bootstrap-policy` ConfigMap in
+`faubourg-system`: the source, the key and the sha256 of exactly what it holds.
 
-!!! danger "Whoever can write the script source is root on every host"
+```sh
+sha256sum examples/host/install.sh
+# scriptSources: ConfigMap/faubourg-install/install.sh@sha256:<that sha256>
+```
 
-    The script runs as root on every host whose copy is updated. Restrict write access to this
-    ConfigMap or Secret as tightly as you restrict cluster-admin. This is accepted risk R-1 in
-    the [threat model](../security/threat-model.md).
+The admission policy refuses a Job for any other source, key or digest, and the bootstrap image
+hashes the mounted script before it connects to anything: a script edited without a re-pin
+fails its Job (`ScriptUnpinned`, exit 66) and reaches no host. A Host whose script is not
+pinned at all is `Failed`, reason `ScriptNotPinned`, and gets no Job.
+
+!!! danger "The script maintainer and the platform administrator are root on every host"
+
+    The script runs as root on every host it is placed on. A change takes both roles: one
+    writes the ConfigMap, the other pins it. Restrict write access to both ConfigMaps as
+    tightly as you restrict cluster-admin. This is accepted risk R-1 in the
+    [threat model](../security/threat-model.md).
 
 ## Two ways to place the script
 
@@ -108,16 +118,36 @@ sudo -n /opt/faubourg/install.sh
 The Host turns `Ready` when the Job succeeded *and* the host's banlieue `Provider` is
 `Ready=True` with an `Alive` heartbeat ([Concepts](../concepts.md#lifecycle-of-a-host)).
 
-A host is re-bootstrapped when its bootstrap inputs change: `address`, `ssh`, or the script
-source it names ([ADR-0009](../adr/0009-host-reconciler.md) decision 6). Cordoning a host,
-moving it to another zone, or upgrading the controller runs nothing on it. The script must
-still be idempotent; the default one is, because banlieue's installer stages are.
+A host is re-bootstrapped when its bootstrap inputs change: `address`, `ssh`, the script
+source it names, or that script's pinned digest
+([ADR-0009](../adr/0009-host-reconciler.md) decision 6,
+[ADR-0013](../adr/0013-script-content-pinned-and-rolled-out.md)). Cordoning a host or moving it
+to another zone runs nothing on it. The script must still be idempotent; the default one is,
+because banlieue's installer stages are.
+
+## Changing the script
+
+Edit the ConfigMap, then pin its new sha256 in `scriptSources`. Every Host using that script is
+then due for a re-bootstrap, and they roll out **one at a time** (`FAUBOURG_MAX_REBOOTSTRAPS`
+on the controller, default 1):
+
+- a Host waiting for its turn keeps its phase, with condition `BootstrapCurrent=False`, reason
+  `RolloutWaiting`;
+- if one re-bootstrap fails, no other starts (`RolloutHalted`) until that Host's inputs change
+  again or you delete its failed Job;
+- `BootstrapCurrent=True` once a Host's Job for the current inputs has succeeded.
+
+A host that has never bootstrapped is not held: it has nothing to lose. To roll back, put the
+previous content back and pin its digest again: the same rollout, in reverse. Upgrading to a
+release with ADR-0013 changes every Host's inputs, so each bootstrapped host re-runs its
+install once, through the same rollout.
 
 A failed bootstrap is not retried by the controller: the Job stays as the record and the Host
 stays `Failed`. Fix the cause, then change the inputs or delete the Job
 (`kubectl -n faubourg-credentials delete job <name>`); the controller creates a new one.
 
-Editing the script's content under the same ConfigMap name does not re-run anything yet.
+Editing the script's content without a re-pin runs nothing: the next Job for that script
+fails before reaching a host, and says why.
 
 ## Adopting a host that already runs banlieue
 

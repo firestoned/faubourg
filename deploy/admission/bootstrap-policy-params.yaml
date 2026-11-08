@@ -10,7 +10,12 @@
 #                       `make release-manifests` (ADR-0012), never edited by hand
 #   serviceAccountName  the bootstrap pods' ServiceAccount (TokenRequest on provider
 #                       ServiceAccounts only, ADR-0011)
-#   scriptSources       comma-separated, no spaces: ConfigMap/<name> or Secret/<name>
+#   scriptSources       comma-separated, no spaces: <Kind>/<name>/<key>@sha256:<64 hex>, Kind
+#                       ConfigMap or Secret. The digest is the sha256 of exactly the file the
+#                       source was created from (`sha256sum install.sh`). A Job runs only a
+#                       pinned script; re-pinning re-bootstraps every Host using it, one at a
+#                       time (ADR-0013). The placeholder below matches no script, so nothing
+#                       bootstraps until you pin yours.
 #   providerServiceAccountPrefix
 #                       the only ServiceAccounts a bootstrap pod may mint a token for:
 #                       banlieue-provider-<class>- (ADR-0011 decision 8)
@@ -25,6 +30,6 @@ metadata:
 data:
   image: "ghcr.io/firestoned/faubourg-bootstrap@sha256:<digest>"
   serviceAccountName: faubourg-bootstrap
-  scriptSources: "ConfigMap/faubourg-install"
+  scriptSources: "ConfigMap/faubourg-install/install.sh@sha256:<your-script-sha256>"
   providerServiceAccountPrefix: "banlieue-provider-cloud-hypervisor-"
   apiAudiences: "https://kubernetes.default.svc.cluster.local"

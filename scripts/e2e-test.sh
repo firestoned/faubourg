@@ -154,6 +154,11 @@ printf '%s %s\n' "$provider" "$namespace" > /etc/banlieue/credentials/provider
 echo "install ran for provider $provider"
 EOF
 kubectl -n "$CREDS" create configmap faubourg-install --from-file=install.sh="$WORK/install.sh" >/dev/null
+# Pinned the way the installing guide says: the sha256 of the very file the ConfigMap holds.
+# The install file ships a placeholder, so nothing bootstraps before this (ADR-0013).
+SCRIPT_SHA="$(sha256sum "$WORK/install.sh" | cut -d' ' -f1)"
+kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+  -p "{\"data\": {\"scriptSources\": \"ConfigMap/faubourg-install/install.sh@sha256:$SCRIPT_SHA\"}}" >/dev/null
 
 # For checking the host's token from outside: the cluster's address and CA, no client cert.
 SERVER="$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')"

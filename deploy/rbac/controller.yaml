@@ -6,8 +6,8 @@
 #
 # The controller can create and delete Jobs in the credentials namespace and read Jobs and
 # Pods there (for the termination message that carries ScriptDrift). It has nothing on
-# Secrets, ConfigMaps, Pod subresources (exec, attach, port-forward) or the admission policy
-# objects, anywhere. What its Jobs may contain is decided by the admission policy, not by
+# Secrets, Pod subresources (exec, attach, port-forward) or the admission policy objects,
+# anywhere, and reads one ConfigMap: the policy's parameters, by name (ADR-0013). What its Jobs may contain is decided by the admission policy, not by
 # this file. In banlieue's namespace it creates, labels and reads the hosts' Providers
 # (ADR-0011 decision 7), and nothing else: it never mints a token. The bootstrap pods mint
 # the first provider token there, bounded by the faubourg-provider-tokens policy.
@@ -145,3 +145,30 @@ subjects:
   - kind: ServiceAccount
     name: faubourg-bootstrap
     namespace: faubourg-credentials
+---
+# The bootstrap policy's parameters, read-only and by name: the controller learns each script's
+# pinned digest from them (ADR-0013 decision 2). No other ConfigMap, here or anywhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faubourg-controller-policy
+  namespace: faubourg-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["faubourg-bootstrap-policy"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faubourg-controller-policy
+  namespace: faubourg-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faubourg-controller-policy
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-controller
+    namespace: faubourg-system

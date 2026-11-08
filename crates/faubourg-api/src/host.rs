@@ -188,6 +188,11 @@ pub struct HostStatus {
     /// Fingerprint of the host key accepted under `TrustOnFirstUse`, pinned afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_host_key: Option<String>,
+    /// The bootstrap inputs (the Job annotation's sha256) of the last bootstrap that
+    /// succeeded. A Host that has one is re-bootstrapped through the rollout (ADR-0013
+    /// decision 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrapped_inputs: Option<String>,
     /// Conditions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,

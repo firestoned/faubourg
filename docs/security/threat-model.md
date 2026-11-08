@@ -5,9 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-08**, against the architecture
-> defined by **ADR-0001 … ADR-0012** (all Accepted;
-> ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended). Eighth
-> pass, closing R-3. The shipped code is `crates/faubourg-api` (types, validation, the SSH
+> defined by **ADR-0001 … ADR-0013** (all Accepted;
+> ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended). Ninth
+> pass, for ADR-0013: the install script's content is pinned by digest in A-8, the image
+> refuses any other, and a change rolls out one host at a time. The eighth pass closed R-3.
+> The shipped code is `crates/faubourg-api` (types, validation, the SSH
 > Secret contract, the Job-to-image contract), `crates/faubourg-controller` (the Host
 > reconciler and its binary) and `crates/faubourg-bootstrap` (the bootstrap image's binary, on
 > russh), with the admission policy, the RBAC and the controller Deployment in `deploy/` and
@@ -52,6 +54,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Provider token minting and the `faubourg-provider-tokens` policy (ADR-0011) | shipped, tested on kind | `crates/faubourg-bootstrap/src/provider.rs`, `deploy/admission/bootstrap-policy.yaml`, `scripts/vap-test.sh` |
 | Bootstrap image (SSH client) | shipped, tested against OpenSSH; released (ADR-0012) and run against a live host | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
 | Image publication and the install file (ADR-0012) | shipped in CI; v0.1.0 and v0.1.1 released and verified | `.github/workflows/build.yaml` (`images`, `release-manifests`), `images/`, `scripts/render-manifests.sh` |
+| Script pinning and the rollout (ADR-0013) | shipped, tested on kind and against OpenSSH | `crates/faubourg-api/src/policy.rs`, `crates/faubourg-controller/src/{plan,job}.rs`, `crates/faubourg-bootstrap/src/config.rs`, `deploy/admission/bootstrap-policy.yaml` |
 | Zone controller | planned, roadmap 02 | |
 
 ## 3. Assets
@@ -60,13 +63,13 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | --- | --- |
 | A-1 Placement credential (`ssh.placementSecretRef`) | Privileged on the host: writes `/opt/faubourg` and `/etc/sudoers.d`. Root-equivalent. |
 | A-2 Scoped run credential (`ssh.secretRef`) | Can run exactly one root-owned script, as the host account placement creates for it (ADR-0010, amended). |
-| A-3 Install script source (ConfigMap or Secret) | Runs as root on every host whose copy is updated. Root-equivalent across the fleet. |
+| A-3 Install script source (ConfigMap or Secret) | Runs as root on every host whose copy is updated, once A-8 pins its content. Root-equivalent across the fleet, with A-8. |
 | A-4 `/opt/faubourg/install.sh` on the host | Root runs it under the sudo rule. |
 | A-5 Host and AvailabilityZone CRs | Decide what gets bootstrapped and where VMs may land. |
 | A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003), and `faubourg.firestoned.io/host` decides which Provider's health is the host's (ADR-0009 decision 5). |
 | A-7 Pinned banlieue digest (the sha256 of the binary, or of banlieue's release tarball) | The script's only proof the binary is genuine. |
-| A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only objects that may be A-3. Root-equivalent across the fleet. |
-| A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace and writes Host status. Cannot read a credential (ADR-0008), but can run the pinned image with any of them (R-5). |
+| A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only scripts that may run: each A-3 source and key with the sha256 of its content (ADR-0013). Root-equivalent across the fleet. The controller reads it; nothing in it is secret. |
+| A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace, writes Host status and reads A-8. Cannot read a credential or a script (ADR-0008, ADR-0013), but can run the pinned image with any credential and a pinned script (R-5). |
 | A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
 | A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
 | A-12 The published images and the install file | The bootstrap image is the fleet's root of trust; the install file decides which digest the admission policy admits (ADR-0012). |
@@ -75,9 +78,9 @@ management path to a host is banlieue's host-resident provider, outbound only.
 
 | Actor | Trust |
 | --- | --- |
-| Platform administrator | Trusted. Writes the admission policy, its parameters (A-8), the RBAC and the Secrets. |
+| Platform administrator | Trusted. Writes the admission policy, its parameters (A-8), the RBAC and the Secrets, and pins each script change (ADR-0013). |
 | Platform operator | Trusted for inventory. Writes Host and AvailabilityZone CRs. |
-| Script maintainer | Trusted for A-3 only. Writes ConfigMaps in the credentials namespace; cannot change which image runs or which objects may be a script (A-8 lives elsewhere). |
+| Script maintainer | Trusted for A-3 only. Writes ConfigMaps in the credentials namespace; cannot change which image runs, which objects may be a script, or which content runs: A-8, which pins it, lives elsewhere. |
 | The Host controller | Not trusted with credentials. A compromise must not yield a key (ADR-0008). |
 | banlieue administrator | Trusted by banlieue. Writes Providers and their labels in banlieue's namespace, so can attach a Provider to a Host by label (R-7). |
 | VM consumer | Untrusted toward faubourg. Never reads or writes faubourg objects. |
@@ -127,7 +130,12 @@ flowchart LR
 
 | Threat | STRIDE | Control |
 | --- | --- | --- |
-| Controller reads SSH Secrets and leaks them | I | The controller's RBAC has no verb on Secrets or ConfigMaps anywhere, and no Pod create or subresource (`deploy/rbac/controller.yaml`; `vap-test` checks each with `auth can-i`). |
+| Controller reads SSH Secrets and leaks them | I | The controller's RBAC has no verb on Secrets anywhere, none on ConfigMaps but `get`, `list` and `watch` on A-8 by name, and no Pod create or subresource (`deploy/rbac/controller.yaml`; `vap-test` checks each with `auth can-i`, including that it cannot read the script, another ConfigMap in `faubourg-system`, or list them). |
+| A script edited in place reaches hosts, unreviewed | T, E | It runs nowhere until the platform administrator pins its sha256 in A-8 (ADR-0013). The admission policy admits a Job only if its script volume's source, its one key and its `FAUBOURG_SCRIPT_SHA256` match a pinned entry, and every entry must be pinned (`deploy/admission/bootstrap-policy.yaml`; `vap-test`: another digest, no digest, another key, two keys, the whole source, a policy with an unpinned entry). The image hashes the mounted script before any connection and exits 66 on a mismatch (TB-2). |
+| A compromised controller has the pinned digest checked and another one used | T, E | The policy accepts exactly one `FAUBOURG_SCRIPT_SHA256`: with two, the container would see the last (`vap-test`: "a second digest after the pinned one"). |
+| A re-pin runs new root code on the whole fleet at once, or keeps going after it breaks a host | T, D | A Host that has bootstrapped before waits for a slot: at most `--max-rebootstraps` (default 1) re-bootstrap Jobs at once, and none starts while another Host's re-bootstrap has failed. The controller reconciles one Host at a time so the count is exact (`plan.rs`, `rollout`, `a_rebootstrap_waits_for_a_slot_and_keeps_its_phase`, `a_failed_rebootstrap_halts_the_rollout`; `controller.rs`, `concurrency(1)`; `controller-test`: "one re-bootstrap starts", "a failed re-bootstrap halts the rollout"). |
+| A forged re-bootstrap Job halts the rollout | D | Creating a Job in the credentials namespace already takes a trusted role, and a halt fails closed: nothing runs until the Job is deleted. |
+| A Host's status is edited so its re-bootstrap skips the rollout | T | Of faubourg's identities only the controller writes `hosts/status` (`deploy/rbac/controller.yaml`); anyone else who can is a cluster administrator. A forged `bootstrappedInputs` changes when a Host runs, never what: the script is still the pinned one. |
 | Compromised controller creates a Job that prints a key (its own image, a command, `envFrom`, an extra volume, a mounted token, a host namespace) | I, E | ADR-0008: every Job in the credentials namespace must run the digest-pinned image from A-8 with no command or arguments, literal env, only the `credentials`, `placement` and `script` volumes read-only, the bootstrap ServiceAccount with no token, no host namespaces and the restricted profile (`deploy/admission/bootstrap-policy.yaml`, `faubourg-bootstrap-jobs`). Applies to cluster-admin too. Each rule has a refusing case in `scripts/vap-test.sh`. |
 | Compromised controller mounts another host's key as the "install script", so placement copies it to a host it chooses | I | The `script` volume must be on A-8's `scriptSources` allowlist (`vap-test`: "another host's key as the script"). |
 | A Secret reaches a pod by another route: a direct Pod, a Deployment, an ephemeral container, `kubectl set image` | I, E | `faubourg-bootstrap-pods`: only `system:serviceaccount:kube-system:job-controller` creates Pods there, for a Job it controls; Pod specs never change; no ephemeral containers (`vap-test`, including a real Job's pod). |
@@ -142,7 +150,7 @@ flowchart LR
 | A Job someone else made, with the Host's labels, is taken as the Host's (a forged `Complete` record, or a squatter) | S, T | Only a Job whose controller `ownerReference` carries the Host's UID counts (`job.rs`, `owned_by`, `only_the_hosts_own_jobs_are_its_jobs`); a recreated Host does not inherit the old one's Jobs (`plan.rs`, `a_job_of_a_recreated_host_is_not_its_own`). |
 | The controller deletes a Job it does not own | T, D | Only owned Jobs are ever deleted (`plan.rs`, `a_job_the_host_does_not_own_is_ignored_and_never_deleted`). |
 | A Job squats the name of a Host's next Job, so bootstrap never starts | D | The create fails with `AlreadyExists`, which the controller logs and retries (`controller.rs`, `JobNameTaken`); it never adopts that Job. Creating a Job there already needs a role trusted with the namespace. |
-| Cordoning a host, moving it to another zone, or upgrading the controller re-runs root's install on it | T | A new Job only when the bootstrap inputs change: `address`, `ssh` and the resolved script source, hashed into the Job's annotation; `zoneRef`, `cordoned` and the image are not inputs (`job.rs`, `cordon_zone_and_image_are_not_bootstrap_inputs`, `the_inputs_encoding_is_pinned`; `controller-test`: "no new Job after a cordon"). |
+| Cordoning a host, moving it to another zone, or upgrading the controller re-runs root's install on it | T | A new Job only when the bootstrap inputs change: `address`, `ssh`, the resolved script source and its pinned digest, hashed into the Job's annotation; `zoneRef`, `cordoned` and the image are not inputs (`job.rs`, `cordon_zone_and_image_are_not_bootstrap_inputs`, `the_pinned_digest_is_an_input_and_in_the_environment`, `the_inputs_encoding_is_pinned`; `controller-test`: "no new Job after a cordon"). The upgrade to ADR-0013 changes the encoding once, so each bootstrapped host re-runs once, through the rollout. |
 | A failed bootstrap is retried in a loop against a host (a wrong key, a refused host key) | D | The controller never replaces a failed current Job; the Host stays `Failed` until its inputs change or an operator deletes the Job (`plan.rs`, `a_failed_job_is_kept_and_not_retried`). |
 | A Host bootstraps into a missing or `Shared` zone | T | No Job until the zone exists and validates (`phase.rs`, `a_missing_zone_holds_a_host_that_has_not_started`; `controller-test`). |
 | A Host name longer than a label value is truncated into another host's label | T | The CRD refuses names over 63 characters (CEL rule in `deploy/crds/faubourg.firestoned.io_hosts.yaml`; `controller-test`), and the builder refuses them too. |
@@ -164,6 +172,7 @@ flowchart LR
 | Threat | STRIDE | Control |
 | --- | --- | --- |
 | Job for host A mounts host B's credential | I, E | The builder mounts only the Secrets the Host names (`job.rs`, `it_mounts_only_its_hosts_secrets_and_the_script`). A compromised controller can still pair any key Secret with any address, but cannot read the key: the pinned image only uses it to authenticate, after verifying the host key (ADR-0008 decision 5, `crates/faubourg-bootstrap/src/ssh.rs`). See R-5. |
+| The Job's script is not the pinned one (edited after pinning, or swapped) | T, E | The image requires `FAUBOURG_SCRIPT_SHA256`, hashes the mounted script and exits 66 (`ScriptUnpinned`) before minting a token or opening a connection; `podFailurePolicy` fails the Job at once (`config.rs`, `the_mounted_script_must_be_the_pinned_one`, `the_pinned_digest_is_required_and_well_formed`; `job.rs`; `bootstrap-test`: "a script edited without a re-pin is refused", "and nothing was connected to", "and nothing was placed"). |
 | A missing Secret starts the pod without a credential | D | Secret volumes are not `optional` (`job.rs`). |
 | The Job's environment carries a secret or a command line | I | Env holds only Host name, address, port, host key policy, the pinned fingerprint and the revoke flag, all literal (`job.rs`, `the_environment_is_literal_and_carries_only_connection_settings`, `the_job_names_secrets_but_holds_no_secret_material`). |
 | Credential printed to logs | I | `Sensitive` redacts `Debug` (`crates/faubourg-api/src/credentials.rs`, `debug_never_prints_secret_material`). The image's `Config` prints names and sizes only (`crates/faubourg-bootstrap/src/config.rs`, `debug_shows_no_script_and_no_credential`); errors name inputs, never values (`errors_never_carry_the_value`). `bootstrap-test` fails if a key or the script's content reaches the log. |
@@ -232,6 +241,9 @@ flowchart LR
   the provider binary.
 - Host health fails closed: only a current-generation `Ready=True` with an `Alive` heartbeat
   counts (`crates/faubourg-controller/src/health.rs`).
+- A script runs only with the content A-8 pins, checked by the admission policy and again by
+  the image before any connection; a change rolls out one host at a time and halts at the first
+  failure (ADR-0013).
 - Bootstrap Jobs are admitted only in the bootstrap shape, and Pods in the credentials
   namespace only from the Job controller (`deploy/admission/bootstrap-policy.yaml`), tested
   against a real API server (`make vap-test`).
@@ -266,7 +278,7 @@ flowchart LR
 
 | ID | Risk | Revisit when |
 | --- | --- | --- |
-| R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | Re-bootstrap on changed script content is designed (roadmap 01): decide then whether the script's digest is pinned in A-8 too. |
+| R-1 | New root code on the fleet takes two roles: the script maintainer writes the source (A-3) and the platform administrator pins its digest (A-8). Together, or one person holding both, they are root on every host, one host at a time, stopping at the first failure (ADR-0013). Mitigated by RBAC on both ConfigMaps. | A second reviewer of a pin (a signed script, or a pin that needs two approvals). |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
 | R-3 | Closed 2026-11-08 by the eighth pass: every control above exists, v0.1.0 and v0.1.1 are released and verified, and a live host was adopted and then bootstrapped from nothing. | (closed) |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
@@ -294,11 +306,10 @@ flowchart LR
   created as `system:serviceaccount:kube-system:job-controller`. Without it the Pod rule
   refuses every bootstrap pod (fails closed). Verify on each distribution; verified live on
   k0s 1.36, with the flag set.
-- A changed script *content* under the same source name re-runs nothing: the controller has
-  no ConfigMap access, so it cannot see the change (ADR-0009 decision 6). A changed source
-  *name* does re-run. Open in roadmap 01.
 - One controller replica, no leader election (ADR-0009 decision 1): an outage delays phase
-  updates and new bootstraps, and changes nothing on the hosts.
+  updates and new bootstraps, and changes nothing on the hosts. It reconciles one Host at a
+  time, which keeps the rollout's count exact; leader election must keep only the leader
+  creating Jobs (ADR-0013).
 
 ## 10. Revision log
 
@@ -314,3 +325,4 @@ flowchart LR
 | 2026-11-08 | 0001 … 0012 | Pass for the ADR-0010 amendment found by the first live test: placement provisions the run account and its key on a fresh host. One TB-3 row added; no new boundary, asset or actor. The live adoption test confirmed R-11 on k0s (`apiAudiences` must be `https://kubernetes.default.svc`), now in the installing guide. |
 | 2026-11-08 | 0001 … 0012 | Pass for the ADR-0011 amendment found by the second live test (bootstrapping a fresh host from faubourg, which worked): a Host switched from `Script` to `None` could no longer label its Provider. The spec has its own field manager now. One TB-1 row added and one rewritten; no new boundary, asset, actor or permission (the controller's Role is unchanged). Header stamp bumped. R-3 is closed by roadmap 01's own pass. |
 | 2026-11-08 | 0001 … 0012 | Eighth pass, the full one roadmap 01 called for: **R-3 closed**. Every section walked against v0.1.1 and the live tests (adoption, then a bootstrap from nothing, on k0s and a real Cloud Hypervisor host). Header, components, A-2 and A-7 rewritten for what shipped; two TB-3 rows (another SSH front end on the address; a re-run reverting a host's local settings) and one TB-4 row (the archive's owner) added; R-11 and two assumptions confirmed live; R-13 added. No new boundary, actor or permission; the diagram is unchanged. |
+| 2026-11-08 | 0001 … 0013 | Ninth pass: ADR-0013 (the script's content pinned by digest, a change rolled out one host at a time, Accepted). The controller reads A-8 by name and nothing else; the policy admits only a pinned source, key and digest, exactly once; the image refuses any other content before connecting (exit 66). A-3, A-8, A-9 and two actors rewritten; TB-1 rows for in-place edits, a duplicated digest, the rollout, a forged halt and a forged status, and one TB-2 row; R-1 narrowed to two roles; the open "script content re-runs nothing" assumption removed. No new boundary; CALM gains A-8 as a data asset with its two relationships. |
