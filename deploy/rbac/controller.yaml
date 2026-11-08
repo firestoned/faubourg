@@ -8,8 +8,9 @@
 # Pods there (for the termination message that carries ScriptDrift). It has nothing on
 # Secrets, ConfigMaps, Pod subresources (exec, attach, port-forward) or the admission policy
 # objects, anywhere. What its Jobs may contain is decided by the admission policy, not by
-# this file. In banlieue's namespace it reads Providers, for the host's health (ADR-0009
-# decision 12); creating and labelling them comes with the Provider work (roadmap 01).
+# this file. In banlieue's namespace it creates, labels and reads the hosts' Providers
+# (ADR-0011 decision 7), and nothing else: it never mints a token. The bootstrap pods mint
+# the first provider token there, bounded by the faubourg-provider-tokens policy.
 # Rename `banlieue-system` below if banlieue runs elsewhere, and pass the same name as
 # --provider-namespace.
 ---
@@ -29,7 +30,9 @@ metadata:
   name: faubourg-controller
   namespace: faubourg-system
 ---
-# The bootstrap pods' identity. No Role binds it; its token is never mounted.
+# The bootstrap pods' identity. Its only permission is TokenRequest in banlieue's namespace,
+# for provider ServiceAccounts (ADR-0011); its token is never auto-mounted, only projected
+# for 600 seconds into the kube-api volume.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -51,6 +54,9 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  - apiGroups: ["banlieue.io"]
+    resources: ["providerclasses"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -100,7 +106,7 @@ metadata:
 rules:
   - apiGroups: ["banlieue.io"]
     resources: ["providers"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -115,3 +121,27 @@ subjects:
   - kind: ServiceAccount
     name: faubourg-controller
     namespace: faubourg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faubourg-bootstrap-provider-tokens
+  namespace: banlieue-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faubourg-bootstrap-provider-tokens
+  namespace: banlieue-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faubourg-bootstrap-provider-tokens
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-bootstrap
+    namespace: faubourg-credentials

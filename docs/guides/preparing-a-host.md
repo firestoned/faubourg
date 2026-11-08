@@ -115,13 +115,29 @@ Editing the script's content under the same ConfigMap name does not re-run anyth
 
 ## Adopting a host that already runs banlieue
 
-Set `bootstrap.method: None`. faubourg creates no Job, needs no SSH settings, and reports the
-health of the host's `Provider`. Until faubourg creates and labels Providers itself
-(roadmap 01), label the existing one with the host's name:
+Set `bootstrap.method: None` and name the Host after the host's existing `Provider`.
+faubourg creates no Job and needs no SSH settings. It labels that Provider with the host's
+zone, name and cordon ([ADR-0011](../adr/0011-the-hosts-provider-and-its-identity.md)
+decision 3), never touches its spec, and reports its health. With no Provider of that name,
+the Host waits (`ProviderMissing`).
 
-```sh
-kubectl -n banlieue-system label provider <provider> faubourg.firestoned.io/host=<host>
-```
+Exactly one Provider may carry the host's label. With two, the Host reports
+`ProviderAmbiguous` and is never `Ready`.
 
-Exactly one Provider may carry that label. With two, the Host reports `ProviderAmbiguous`
-and is never `Ready`.
+## The host's Provider and its credential
+
+For a bootstrapped Host, faubourg creates the `Provider` itself, named after the Host, in
+banlieue's namespace, of the configured class (`--provider-class`, default
+`cloud-hypervisor`), which must be `External`. banlieue's operator then creates its
+ServiceAccount, and only then does faubourg create the bootstrap Job (`Pending`, reason
+`AwaitingProviderIdentity`, until it has).
+
+The Job mints the provider's first token, valid for a day, and hands it to the install script
+on its standard input, with a kubeconfig that reads it from `/etc/banlieue/credentials/token`.
+The default script installs both there and names the Provider to banlieue's installer. From
+then on banlieue's provider renews its own token. The controller never sees the token, and no
+Secret holds it.
+
+A replacement install script must read the bundle from stdin (format in ADR-0011 decision 9),
+or install the credential some other way. A host that stays down longer than its token's
+lifetime is recovered by re-bootstrapping it: delete its Job.

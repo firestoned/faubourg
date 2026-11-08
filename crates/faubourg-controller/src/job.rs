@@ -25,9 +25,10 @@ use k8s_openapi::api::batch::v1::{
     Job, JobSpec, PodFailurePolicy, PodFailurePolicyOnExitCodesRequirement, PodFailurePolicyRule,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMapVolumeSource, Container, EnvVar, KeyToPath, Pod, PodSecurityContext,
-    PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretVolumeSource,
-    SecurityContext, Volume, VolumeMount,
+    Capabilities, ConfigMapProjection, ConfigMapVolumeSource, Container, EnvVar, KeyToPath, Pod,
+    PodSecurityContext, PodSpec, PodTemplateSpec, ProjectedVolumeSource, ResourceRequirements,
+    SeccompProfile, SecretVolumeSource, SecurityContext, ServiceAccountTokenProjection, Volume,
+    VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -38,11 +39,14 @@ use crate::phase::{JobFailure, JobState};
 
 // The contract with the bootstrap image lives in faubourg-api, so the builder and the image
 // cannot disagree on it (ADR-0010).
+use faubourg_api::banlieue::provider_service_account;
 pub use faubourg_api::bootstrap::{
     CONTAINER, ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT,
-    ENV_REVOKE_PLACEMENT, EXIT_HOST_KEY_REFUSED, EXIT_SCRIPT_DRIFT, MOUNT_CREDENTIALS,
-    MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, VOLUME_CREDENTIALS, VOLUME_PLACEMENT,
-    VOLUME_SCRIPT,
+    ENV_PROVIDER, ENV_PROVIDER_API_SERVER, ENV_PROVIDER_NAMESPACE, ENV_PROVIDER_SERVICE_ACCOUNT,
+    ENV_REVOKE_PLACEMENT, EXIT_HOST_KEY_REFUSED, EXIT_SCRIPT_DRIFT, KUBE_API_CA_FILE,
+    KUBE_API_TOKEN_FILE, KUBE_API_TOKEN_SECONDS, KUBE_ROOT_CA_CONFIGMAP, MOUNT_CREDENTIALS,
+    MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, VOLUME_CREDENTIALS,
+    VOLUME_KUBE_API, VOLUME_PLACEMENT, VOLUME_SCRIPT,
 };
 use faubourg_api::bootstrap::{Report, is_fingerprint};
 
@@ -78,6 +82,19 @@ pub struct BootstrapConfig {
     pub service_account: String,
     /// The script source for a Host with no `bootstrap.scriptRef`.
     pub default_script: Option<ScriptRef>,
+    /// The host's Provider, as the Job needs it (ADR-0011).
+    pub provider: ProviderConfig,
+}
+
+/// Where the hosts' Providers live, and how their providers reach the API server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderConfig {
+    /// The `ProviderClass` every host's Provider references; it must be `External`.
+    pub class: String,
+    /// banlieue's namespace, where the Providers and their `ServiceAccounts` live.
+    pub namespace: String,
+    /// The API server address the hosts' providers use (`https://...`).
+    pub api_server: String,
 }
 
 /// Why no Job was built. Never carries secret material.
@@ -194,7 +211,16 @@ pub fn bootstrap_job(host: &Host, cfg: &BootstrapConfig) -> Result<Job, JobError
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
 
-    let env = environment(name, &spec.address, ssh, host.status.as_ref());
+    let mut env = environment(name, &spec.address, ssh, host.status.as_ref());
+    env.extend([
+        literal(ENV_PROVIDER, name),
+        literal(ENV_PROVIDER_NAMESPACE, &cfg.provider.namespace),
+        literal(
+            ENV_PROVIDER_SERVICE_ACCOUNT,
+            &provider_service_account(&cfg.provider.class, name),
+        ),
+        literal(ENV_PROVIDER_API_SERVER, &cfg.provider.api_server),
+    ]);
 
     let mut volumes = vec![secret_volume(VOLUME_CREDENTIALS, &ssh.secret_ref.name)];
     let mut mounts = vec![read_only(VOLUME_CREDENTIALS, MOUNT_CREDENTIALS)];
@@ -204,6 +230,8 @@ pub fn bootstrap_job(host: &Host, cfg: &BootstrapConfig) -> Result<Job, JobError
     }
     volumes.push(script_volume(script));
     mounts.push(read_only(VOLUME_SCRIPT, MOUNT_SCRIPT));
+    volumes.push(kube_api_volume());
+    mounts.push(read_only(VOLUME_KUBE_API, MOUNT_KUBE_API));
 
     let pod = pod_spec(
         container(&cfg.image, env, mounts),
@@ -445,6 +473,9 @@ fn pod_spec(container: Container, volumes: Vec<Volume>, service_account: &str) -
             run_as_non_root: Some(true),
             run_as_user: Some(RUN_AS),
             run_as_group: Some(RUN_AS),
+            // Secret volumes are root-owned 0400: without this group the bootstrap user
+            // cannot read its own credentials. The kubelet makes them group-readable by it.
+            fs_group: Some(RUN_AS),
             seccomp_profile: Some(SeccompProfile {
                 type_: "RuntimeDefault".into(),
                 ..SeccompProfile::default()
@@ -542,6 +573,43 @@ fn script_volume(r: &ScriptRef) -> Volume {
     v
 }
 
+/// The bootstrap pod's own API access (ADR-0011 decision 6): a short-lived token for its
+/// `ServiceAccount`, the API server's default audience, and the cluster CA. The admission policy
+/// admits this volume only in exactly this shape.
+fn kube_api_volume() -> Volume {
+    Volume {
+        name: VOLUME_KUBE_API.into(),
+        projected: Some(ProjectedVolumeSource {
+            default_mode: Some(0o400),
+            sources: Some(vec![
+                VolumeProjection {
+                    service_account_token: Some(ServiceAccountTokenProjection {
+                        path: KUBE_API_TOKEN_FILE.into(),
+                        expiration_seconds: Some(KUBE_API_TOKEN_SECONDS),
+                        audience: None,
+                        ..ServiceAccountTokenProjection::default()
+                    }),
+                    ..VolumeProjection::default()
+                },
+                VolumeProjection {
+                    config_map: Some(ConfigMapProjection {
+                        name: KUBE_ROOT_CA_CONFIGMAP.into(),
+                        items: Some(vec![KeyToPath {
+                            key: KUBE_API_CA_FILE.into(),
+                            path: KUBE_API_CA_FILE.into(),
+                            ..KeyToPath::default()
+                        }]),
+                        optional: None,
+                    }),
+                    ..VolumeProjection::default()
+                },
+            ]),
+            ..ProjectedVolumeSource::default()
+        }),
+        ..Volume::default()
+    }
+}
+
 fn quantities(pairs: &[(&str, &str)]) -> BTreeMap<String, Quantity> {
     pairs
         .iter()
@@ -567,6 +635,11 @@ mod tests {
                 name: "faubourg-install".into(),
                 key: DEFAULT_SCRIPT_KEY.into(),
             }),
+            provider: ProviderConfig {
+                class: "cloud-hypervisor".into(),
+                namespace: "banlieue-system".into(),
+                api_server: "https://kube.home.example:6443".into(),
+            },
         }
     }
 
@@ -845,6 +918,13 @@ mod tests {
             (ENV_PORT, "2222"),
             (ENV_HOST_KEY_POLICY, "Strict"),
             (ENV_REVOKE_PLACEMENT, "true"),
+            (ENV_PROVIDER, "hv01"),
+            (ENV_PROVIDER_NAMESPACE, "banlieue-system"),
+            (
+                ENV_PROVIDER_SERVICE_ACCOUNT,
+                "banlieue-provider-cloud-hypervisor-hv01",
+            ),
+            (ENV_PROVIDER_API_SERVER, "https://kube.home.example:6443"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), Some(v.to_string())))
@@ -875,7 +955,15 @@ mod tests {
     fn it_mounts_only_its_hosts_secrets_and_the_script() {
         let j = build(&host());
         let names: Vec<&str> = volumes(&j).iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, [VOLUME_CREDENTIALS, VOLUME_PLACEMENT, VOLUME_SCRIPT]);
+        assert_eq!(
+            names,
+            [
+                VOLUME_CREDENTIALS,
+                VOLUME_PLACEMENT,
+                VOLUME_SCRIPT,
+                VOLUME_KUBE_API
+            ]
+        );
         let secret = |n: &str| {
             volume(&j, n)
                 .and_then(|v| v.secret.as_ref())
@@ -965,6 +1053,7 @@ mod tests {
                 (VOLUME_CREDENTIALS, MOUNT_CREDENTIALS, Some(true)),
                 (VOLUME_PLACEMENT, MOUNT_PLACEMENT, Some(true)),
                 (VOLUME_SCRIPT, MOUNT_SCRIPT, Some(true)),
+                (VOLUME_KUBE_API, MOUNT_KUBE_API, Some(true)),
             ]
         );
         assert!(container(&j).volume_devices.is_none());
@@ -998,6 +1087,11 @@ mod tests {
         assert_eq!(ps.run_as_non_root, Some(true));
         assert_eq!(ps.run_as_user, Some(RUN_AS));
         assert_eq!(ps.run_as_group, Some(RUN_AS));
+        assert_eq!(
+            ps.fs_group,
+            Some(RUN_AS),
+            "or the image cannot read its Secrets"
+        );
         assert_eq!(
             ps.seccomp_profile.as_ref().map(|s| s.type_.as_str()),
             Some("RuntimeDefault")
@@ -1228,6 +1322,33 @@ mod tests {
         assert_eq!(
             job_state(&j, &[exited("other-uid", EXIT_SCRIPT_DRIFT)]),
             JobState::Failed(JobFailure::Other)
+        );
+    }
+
+    // ----- the bootstrap pod's own API access (ADR-0011) ---------------------------------
+
+    #[test]
+    fn the_kube_api_volume_is_a_short_lived_token_and_the_cluster_ca_only() {
+        let j = build(&host());
+        let v = volume(&j, VOLUME_KUBE_API).unwrap();
+        assert!(v.secret.is_none() && v.config_map.is_none() && v.host_path.is_none());
+        let sources = v.projected.as_ref().unwrap().sources.as_deref().unwrap();
+        assert_eq!(sources.len(), 2);
+        let token = sources[0].service_account_token.as_ref().unwrap();
+        assert_eq!(token.expiration_seconds, Some(600));
+        assert_eq!(token.audience, None, "the API server's default audience");
+        assert_eq!(token.path, KUBE_API_TOKEN_FILE);
+        let ca = sources[1].config_map.as_ref().unwrap();
+        assert_eq!(ca.name, KUBE_ROOT_CA_CONFIGMAP);
+        assert!(
+            sources
+                .iter()
+                .all(|s| s.secret.is_none() && s.downward_api.is_none())
+        );
+        assert_eq!(
+            pod(&j).automount_service_account_token,
+            Some(false),
+            "the token is only this projection, never the default mount"
         );
     }
 }

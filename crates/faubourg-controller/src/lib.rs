@@ -9,6 +9,7 @@
 //! - [`phase`]: the Host phase machine, from its spec, zone, bootstrap Job and that health.
 //! - [`job`]: the bootstrap Job a Host needs, in the shape the admission policy admits
 //!   (ADR-0008), and how to read one back.
+//! - [`provider`]: the host's banlieue Provider, as faubourg applies it (ADR-0011).
 //! - [`plan`]: one reconcile, from everything it reads to everything it writes.
 //! - [`config`]: the controller's flags, validated before it starts.
 //!
@@ -22,3 +23,4 @@ pub mod health;
 pub mod job;
 pub mod phase;
 pub mod plan;
+pub mod provider;

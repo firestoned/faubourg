@@ -23,7 +23,7 @@
       "unique-id": "service-host-controller",
       "node-type": "service",
       "name": "Host controller",
-      "description": "The faubourg-controller Deployment in faubourg-system, one replica (ADR-0009). Reconciles Host: gates on the zone, creates the bootstrap Job when the Host's bootstrap inputs change and deletes stale ones, derives the phase from the Job and the host's labelled Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets or ConfigMaps. Creating and labelling the Provider is planned (roadmap 01)."
+      "description": "The faubourg-controller Deployment in faubourg-system, one replica (ADR-0009). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change, derives the phase from the Job and the Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets or ConfigMaps, never mints a token."
     },
     {
       "unique-id": "service-zone-controller",
@@ -35,7 +35,7 @@
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job",
-      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
@@ -71,7 +71,7 @@
       "unique-id": "data-asset-provider-cr",
       "node-type": "data-asset",
       "name": "banlieue Provider (one per host)",
-      "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager; its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007)."
+      "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager; its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
     },
     {
       "unique-id": "system-ch-host",
@@ -331,7 +331,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Reads the host's Provider, the one labelled faubourg.firestoned.io/host, for its health (ADR-0007, ADR-0009 decision 5). Planned: creates it and owns its zone, host and cordon labels by field manager (ADR-0003).",
+      "description": "Applies the host's Provider, named after the Host, by server-side apply under faubourg.firestoned.io/host-controller: class, endpoint, zone, host, cordon and zone labels for a bootstrapped host, labels only for an adopted one. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -342,6 +342,21 @@
           }
         }
       }
+    },
+    {
+      "unique-id": "rel-job-token-request",
+      "description": "Requests a day's token for the host Provider's ServiceAccount (TokenRequest), as faubourg-bootstrap with a 10-minute projected token; bounded by RBAC and the faubourg-provider-tokens admission policy to provider ServiceAccounts of one class, at most a day, no audience or binding (ADR-0011).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-bootstrap-job"
+          },
+          "destination": {
+            "node": "ecosystem-kube-api"
+          }
+        }
+      },
+      "protocol": "HTTPS"
     }
   ],
   "flows": [
@@ -358,7 +373,7 @@
         {
           "sequence-number": 2,
           "relationship-unique-id": "rel-host-controller-kube",
-          "description": "Host controller checks the zone exists and is supported, then creates the bootstrap Job; phase Bootstrapping."
+          "description": "Host controller checks the zone and the External class, applies the host's Provider, waits for banlieue to give it an identity, then creates the bootstrap Job; phase Bootstrapping."
         },
         {
           "sequence-number": 3,
@@ -368,12 +383,12 @@
         {
           "sequence-number": 4,
           "relationship-unique-id": "rel-job-ssh",
-          "description": "The Job verifies the host key, places the script if absent or changed, and runs sudo -n /opt/faubourg/install.sh."
+          "description": "The Job mints the provider's first token, verifies the host key, places the script if absent or changed, and runs sudo -n /opt/faubourg/install.sh with the credential on stdin."
         },
         {
           "sequence-number": 5,
           "relationship-unique-id": "rel-host-controller-provider-cr",
-          "description": "Host controller creates the Provider with the zone labels (planned, roadmap 01; until then an operator labels it)."
+          "description": "The install script installs the credential where banlieue's provider reads it; the Provider carries faubourg's zone labels (ADR-0011)."
         },
         {
           "sequence-number": 6,
@@ -405,6 +420,7 @@
     "docs/adr/0007-health-from-the-banlieue-provider.md",
     "docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md",
     "docs/adr/0009-host-reconciler.md",
-    "docs/adr/0010-bootstrap-image.md"
+    "docs/adr/0010-bootstrap-image.md",
+    "docs/adr/0011-the-hosts-provider-and-its-identity.md"
   ]
 }

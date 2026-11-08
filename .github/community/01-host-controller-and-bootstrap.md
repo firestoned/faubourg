@@ -16,9 +16,11 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [ ] Re-bootstrap on changed script *content* under the same source name, without giving the controller ConfigMap access (ADR-0009 decision 6)
 - [x] ADR-0010 and the bootstrap image (`crates/faubourg-bootstrap`, `images/bootstrap/`): russh, no shell in the image; host key verified before authenticating and always `Strict` when the Secret has `knownHosts`; owner, mode and sha256 check of the on-host script; placement and `visudo`-checked sudo rule; `sudo -n /opt/faubourg/install.sh`; exit 64 `ScriptDrift` and 65 `HostKeyRefused`; tested against a real sshd (`make bootstrap-test`)
 - [x] TOFU fingerprint reported by the Job and pinned in status by the controller; `revokeAfterBootstrap`
-- [ ] Create and label the host's banlieue `Provider` (field manager `faubourg.firestoned.io/host-controller`)
+- [x] ADR-0011: faubourg creates and labels the host's banlieue `Provider` (field manager `faubourg.firestoned.io/host-controller`), labels an adopted one, never deletes one; tested on kind (`make controller-test`)
 - [ ] Controller image: build, sign and publish `faubourg-controller`, and pin it in `deploy/controller/deployment.yaml`
 - [ ] Leader election, before more than one replica
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
-- [ ] ADR: how the host-resident provider gets its kube identity
+- [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
+- [ ] Ask banlieue to publish the provider ServiceAccount name (status or `banlieue-api`), and drop faubourg's copy of its naming
+- [ ] A CA option for hosts that reach the API server through another certificate authority
 - [ ] Live test against one host; threat-model pass closes R-3

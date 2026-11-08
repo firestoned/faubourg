@@ -14,8 +14,10 @@
 //!   one: a valid spec in a supported zone. A failed current Job is kept, never replaced
 //!   (decision 7).
 
-use banlieue_api::banlieue::Provider;
-use faubourg_api::host::{Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME};
+use banlieue_api::banlieue::{Provider, ProviderClass};
+use faubourg_api::host::{
+    BootstrapMethod, Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME,
+};
 use faubourg_api::zone::AvailabilityZone;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -26,7 +28,11 @@ use crate::job::{
     BootstrapConfig, JobError, bootstrap_job, job_generation, job_inputs, job_state, owned_by,
     reported_host_key,
 };
-use crate::phase::{Decision, JobState, Observed, ZoneState, decide};
+use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
+use crate::provider::{
+    REASON_AWAITING_IDENTITY, REASON_CLASS_NOT_EXTERNAL, apply_body as provider_body,
+    class_is_external, identity_ready,
+};
 
 /// The Host condition the reconciler writes.
 pub const CONDITION_READY: &str = "Ready";
@@ -48,6 +54,10 @@ pub struct World<'a> {
     pub pods: &'a [Pod],
     /// Providers in banlieue's namespace labelled with the Host's name.
     pub providers: &'a [Provider],
+    /// The Provider named after the Host, labelled or not (ADR-0011 decision 1).
+    pub own_provider: Option<&'a Provider>,
+    /// The configured `ProviderClass`, if it exists.
+    pub class: Option<&'a ProviderClass>,
     /// The controller's configuration.
     pub cfg: &'a BootstrapConfig,
     /// The time to stamp on a condition that changes.
@@ -67,6 +77,9 @@ pub struct Plan {
     pub status_changed: bool,
     /// The phase decision `status` was built from.
     pub decision: Decision,
+    /// The server-side apply body for the host's Provider, if one is to be applied
+    /// (ADR-0011 decisions 2 and 3).
+    pub apply_provider: Option<serde_json::Value>,
 }
 
 /// Why no plan was made: the Host was not read from an API server.
@@ -94,26 +107,27 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         .filter(|j| want.is_some() && job_inputs(j) == want)
         .max_by_key(|j| job_generation(j));
     let job = current.map_or(JobState::Absent, |j| job_state(j, w.pods));
-    // A first-use key is pinned from the Host's own succeeded Job (ADR-0010 decision 8).
-    let first_use = host
-        .spec
-        .ssh
-        .as_ref()
-        .is_some_and(|s| s.host_key_policy == HostKeyPolicy::TrustOnFirstUse);
-    let pinned = host
-        .status
-        .as_ref()
-        .and_then(|s| s.accepted_host_key.clone());
-    let accepted_host_key = match (pinned, current) {
-        (Some(fp), _) => Some(fp),
-        (None, Some(j)) if first_use && job == JobState::Succeeded => reported_host_key(j, w.pods),
-        (None, _) => None,
-    };
+    let accepted_host_key = accepted_host_key(host, current, job, w.pods);
     let zone = zone_state(w.zone);
     let provider = ProviderHealth::of_labelled(w.providers);
     let previous = host.status.as_ref().and_then(|s| s.phase);
 
-    let decision = refusal.unwrap_or_else(|| {
+    let script = host.spec.bootstrap.method == BootstrapMethod::Script;
+    let valid = host.spec.validate().is_ok();
+    let external = class_is_external(w.class);
+    // A bootstrapped Host needs an External class before anything is created for it.
+    let refusal = refusal.or_else(|| {
+        (script && valid && !external).then(|| Decision {
+            phase: HostPhase::Failed,
+            reason: REASON_CLASS_NOT_EXTERNAL,
+            message: format!(
+                "ProviderClass {} is missing or not External",
+                w.cfg.provider.class
+            ),
+        })
+    });
+    let identity = identity_ready(w.own_provider);
+    let mut decision = refusal.clone().unwrap_or_else(|| {
         decide(&Observed {
             spec: &host.spec,
             previous,
@@ -122,22 +136,36 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
             provider,
         })
     });
+    // No Job until banlieue's operator has given the Provider its identity (decision 2).
+    if script && decision.reason == REASON_AWAITING_JOB && !identity {
+        decision = Decision {
+            phase: HostPhase::Pending,
+            reason: REASON_AWAITING_IDENTITY,
+            message: "waiting for banlieue to give the host's Provider its identity".into(),
+        };
+    }
+    let apply_provider = if !valid || refusal.is_some() {
+        None
+    } else if script || w.own_provider.is_some() {
+        provider_body(
+            host,
+            w.zone,
+            &w.cfg.provider.class,
+            &w.cfg.provider.namespace,
+        )
+    } else {
+        None
+    };
 
-    let current_name = current.and_then(|j| j.metadata.name.as_deref());
-    let mut delete: Vec<String> = owned
-        .iter()
-        .filter_map(|j| j.metadata.name.as_deref())
-        .filter(|n| Some(*n) != current_name)
-        .map(str::to_string)
-        .collect();
-    delete.sort();
-    delete.dedup();
+    let delete = stale(&owned, current);
 
     // A stale Job holding the name the new one needs is deleted first; the new one is created
     // on the next reconcile, which that deletion triggers.
     let create = desired.filter(|d| {
         job == JobState::Absent
             && zone == ZoneState::Supported
+            && refusal.is_none()
+            && identity
             && d.metadata
                 .name
                 .as_deref()
@@ -163,7 +191,46 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         status,
         status_changed,
         decision,
+        apply_provider,
     })
+}
+
+/// A first-use key is pinned from the Host's own succeeded Job (ADR-0010 decision 8), and a
+/// pinned one is never replaced.
+fn accepted_host_key(
+    host: &Host,
+    current: Option<&Job>,
+    job: JobState,
+    pods: &[Pod],
+) -> Option<String> {
+    let first_use = host
+        .spec
+        .ssh
+        .as_ref()
+        .is_some_and(|s| s.host_key_policy == HostKeyPolicy::TrustOnFirstUse);
+    let pinned = host
+        .status
+        .as_ref()
+        .and_then(|s| s.accepted_host_key.clone());
+    match (pinned, current) {
+        (Some(fp), _) => Some(fp),
+        (None, Some(j)) if first_use && job == JobState::Succeeded => reported_host_key(j, pods),
+        (None, _) => None,
+    }
+}
+
+/// Every owned Job but the current one, by name, sorted.
+fn stale(owned: &[&Job], current: Option<&Job>) -> Vec<String> {
+    let current_name = current.and_then(|j| j.metadata.name.as_deref());
+    let mut delete: Vec<String> = owned
+        .iter()
+        .filter_map(|j| j.metadata.name.as_deref())
+        .filter(|n| Some(*n) != current_name)
+        .map(str::to_string)
+        .collect();
+    delete.sort();
+    delete.dedup();
+    delete
 }
 
 /// The zone's state: missing, refused by its own validation, or supported.
@@ -237,9 +304,8 @@ mod tests {
     use super::*;
     use crate::job::{ANNOTATION_INPUTS, EXIT_SCRIPT_DRIFT, job_name};
     use crate::phase::{
-        REASON_AWAITING_JOB, REASON_JOB_FAILED, REASON_JOB_RUNNING, REASON_PROVIDER_AMBIGUOUS,
-        REASON_PROVIDER_HEALTHY, REASON_SCRIPT_DRIFT, REASON_ZONE_NOT_FOUND,
-        REASON_ZONE_UNSUPPORTED,
+        REASON_JOB_FAILED, REASON_JOB_RUNNING, REASON_PROVIDER_AMBIGUOUS, REASON_PROVIDER_HEALTHY,
+        REASON_SCRIPT_DRIFT, REASON_ZONE_NOT_FOUND, REASON_ZONE_UNSUPPORTED,
     };
     use faubourg_api::host::{
         BootstrapMethod, BootstrapSpec, DEFAULT_SCRIPT_KEY, HostKeyPolicy, HostSpec, ScriptRef,
@@ -262,6 +328,11 @@ mod tests {
                 name: "faubourg-install".into(),
                 key: DEFAULT_SCRIPT_KEY.into(),
             }),
+            provider: crate::job::ProviderConfig {
+                class: "cloud-hypervisor".into(),
+                namespace: "banlieue-system".into(),
+                api_server: "https://kube.home.example:6443".into(),
+            },
         }
     }
 
@@ -354,6 +425,8 @@ mod tests {
         jobs: Vec<Job>,
         pods: Vec<Pod>,
         providers: Vec<Provider>,
+        own_provider: Option<Provider>,
+        class: Option<ProviderClass>,
         cfg: BootstrapConfig,
         now: Time,
     }
@@ -366,6 +439,8 @@ mod tests {
                 jobs: vec![],
                 pods: vec![],
                 providers: vec![],
+                own_provider: Some(own(true)),
+                class: Some(class("External")),
                 cfg: cfg(),
                 now: at(1_000),
             }
@@ -378,11 +453,39 @@ mod tests {
                 jobs: &self.jobs,
                 pods: &self.pods,
                 providers: &self.providers,
+                own_provider: self.own_provider.as_ref(),
+                class: self.class.as_ref(),
                 cfg: &self.cfg,
                 now: &self.now,
             })
             .unwrap()
         }
+    }
+
+    fn class(deployment: &str) -> ProviderClass {
+        serde_json::from_value(json!({
+            "apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass",
+            "metadata": { "name": "cloud-hypervisor" },
+            "spec": { "backend": "cloud-hypervisor", "deployment": deployment }
+        }))
+        .unwrap()
+    }
+
+    /// The Provider named after the Host, with or without its identity.
+    fn own(identity: bool) -> Provider {
+        let status = if identity {
+            json!({ "workload": { "mode": "External", "namespace": "banlieue-system" } })
+        } else {
+            json!({})
+        };
+        serde_json::from_value(json!({
+            "apiVersion": "banlieue.io/v1alpha1", "kind": "Provider",
+            "metadata": { "name": "hv01", "namespace": "banlieue-system" },
+            "spec": { "providerClassRef": { "name": "cloud-hypervisor" },
+                      "connection": { "endpoint": "ch://hv01.home.example" } },
+            "status": status
+        }))
+        .unwrap()
     }
 
     fn created_name(p: &Plan) -> Option<&str> {
@@ -658,6 +761,8 @@ mod tests {
             jobs: &f.jobs,
             pods: &f.pods,
             providers: &f.providers,
+            own_provider: f.own_provider.as_ref(),
+            class: f.class.as_ref(),
             cfg: &f.cfg,
             now: &f.now,
         });
@@ -745,5 +850,73 @@ mod tests {
             f.pods = vec![reported("j1", msg)];
             assert_eq!(f.plan().status.accepted_host_key, None, "{msg:?}");
         }
+    }
+
+    // ----- the host's Provider (ADR-0011) -------------------------------------------------
+
+    #[test]
+    fn a_bootstrapped_host_gets_its_provider_applied() {
+        let p = Fixture::new(host(1)).plan();
+        let b = p.apply_provider.expect("the Provider is applied");
+        assert_eq!(b["metadata"]["name"], "hv01");
+        assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
+    }
+
+    #[test]
+    fn no_job_until_banlieue_gives_the_provider_its_identity() {
+        let mut f = Fixture::new(host(1));
+        f.own_provider = None;
+        let p = f.plan();
+        assert_eq!(p.create, None);
+        assert_eq!(p.decision.phase, HostPhase::Pending);
+        assert_eq!(p.decision.reason, REASON_AWAITING_IDENTITY);
+        assert!(p.apply_provider.is_some(), "the Provider is created first");
+        f.own_provider = Some(own(false));
+        assert_eq!(f.plan().create, None);
+        f.own_provider = Some(own(true));
+        assert!(f.plan().create.is_some());
+    }
+
+    #[test]
+    fn a_class_that_is_missing_or_not_external_fails_the_host_and_creates_nothing() {
+        for class in [None, Some(class("Managed"))] {
+            let mut f = Fixture::new(host(1));
+            f.class = class;
+            let p = f.plan();
+            assert_eq!(p.decision.phase, HostPhase::Failed);
+            assert_eq!(p.decision.reason, REASON_CLASS_NOT_EXTERNAL);
+            assert_eq!(p.create, None);
+            assert_eq!(p.apply_provider, None);
+        }
+    }
+
+    #[test]
+    fn an_adopted_host_labels_its_existing_provider_only() {
+        let mut f = Fixture::new(adopted());
+        f.own_provider = None;
+        assert_eq!(
+            f.plan().apply_provider,
+            None,
+            "never created for an adopted host"
+        );
+        f.own_provider = Some(own(true));
+        let b = f.plan().apply_provider.unwrap();
+        assert!(b.get("spec").is_none());
+        assert_eq!(
+            b["metadata"]["labels"]["faubourg.firestoned.io/host"],
+            "hv01"
+        );
+        f.class = None;
+        assert!(
+            f.plan().apply_provider.is_some(),
+            "an adopted host does not depend on the class"
+        );
+    }
+
+    #[test]
+    fn an_invalid_spec_touches_no_provider() {
+        let mut f = Fixture::new(host(1));
+        f.host.spec.address = "-oProxyCommand=sh".into();
+        assert_eq!(f.plan().apply_provider, None);
     }
 }

@@ -15,7 +15,7 @@ use faubourg_bootstrap::config::Config;
 use faubourg_bootstrap::hostkey::Verifier;
 use faubourg_bootstrap::ssh::Ssh;
 use faubourg_bootstrap::steps::{self, Outcome, Placement, Plan};
-use faubourg_bootstrap::{exit_code, remote, sha256_hex};
+use faubourg_bootstrap::{exit_code, provider, remote, sha256_hex};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -62,11 +62,32 @@ async fn run() -> i32 {
             return EXIT_FAILED;
         }
     };
+    // The provider token is minted before any connection: no token, nothing touches the host.
+    let run_stdin = match &cfg.provider {
+        None => Vec::new(),
+        Some(p) => match provider::mint(&p.access, &p.target).await {
+            Ok(m) => {
+                info!(
+                    service_account = %p.target.service_account,
+                    expires = m.expires.as_deref().unwrap_or("unknown"),
+                    "minted the host's provider token"
+                );
+                let kubeconfig =
+                    provider::host_kubeconfig(&p.target.api_server, &p.ca_pem, &p.target.namespace);
+                provider::bundle(&p.target, &m.token, &kubeconfig)
+            }
+            Err(e) => {
+                error!(error = %e, "cannot mint the host's provider token");
+                return EXIT_FAILED;
+            }
+        },
+    };
     let plan = Plan {
         script_sha256: sha256_hex(&cfg.script),
         script: cfg.script.clone(),
         run_user: cfg.run.username.clone(),
         placement,
+        run_stdin,
     };
     let mut ssh = Ssh::new(
         cfg.address.clone(),

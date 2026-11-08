@@ -33,7 +33,8 @@ async fn main() -> ExitCode {
     };
     info!(
         credentials_namespace = %cfg.bootstrap.namespace,
-        provider_namespace = %cfg.provider_namespace,
+        provider_namespace = %cfg.bootstrap.provider.namespace,
+        provider_class = %cfg.bootstrap.provider.class,
         "starting the Host controller"
     );
     controller::run(client, cfg).await;

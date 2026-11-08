@@ -6,14 +6,18 @@
 #
 #   faubourg-bootstrap-jobs  every Job there must have the bootstrap shape;
 #   faubourg-bootstrap-pods  only the Job controller creates Pods there, a Pod's spec never
-#                            changes, and no ephemeral container is added.
+#                            changes, and no ephemeral container is added;
+#   faubourg-provider-tokens a bootstrap pod mints tokens only for a provider ServiceAccount,
+#                            for at most a day (ADR-0011), bound to banlieue's namespace.
 #
 # Together they mean a Secret in the credentials namespace reaches only a pod running the
 # digest-pinned bootstrap image, whoever asked for it, cluster-admin included. Parameters
 # come from faubourg-bootstrap-policy in faubourg-system (bootstrap-policy-params.yaml).
 #
-# Rename `faubourg-credentials` in both bindings if the controller is configured with
-# another credentials namespace. Tested against a real API server: `make vap-test`.
+# Rename `faubourg-credentials` in the first two bindings and in the token policy's match
+# condition if the controller is configured with another credentials namespace, and
+# `banlieue-system` in the token binding if banlieue runs elsewhere. Tested against a real
+# API server: `make vap-test`.
 # Requires Kubernetes 1.30 or later.
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -64,13 +68,25 @@ spec:
         && (!has(variables.c.env) || variables.c.env.all(e, !has(e.valueFrom)))
       message: "the bootstrap container's environment is literal values only"
     - expression: >-
-        variables.volumes.all(v, v.name in ['credentials', 'placement', 'script'])
+        variables.volumes.all(v, v.name in ['credentials', 'placement', 'script', 'kube-api'])
         && variables.volumes.exists(v, v.name == 'credentials')
         && variables.volumes.exists(v, v.name == 'script')
-      message: "a Job here mounts exactly the credentials, optional placement, and script volumes"
+      message: "a Job here mounts exactly the credentials, optional placement, script and kube-api volumes"
     - expression: >-
-        variables.volumes.all(v, v.name == 'script' || has(v.secret))
+        variables.volumes.all(v, v.name in ['script', 'kube-api'] || has(v.secret))
       message: "the credentials and placement volumes are Secrets"
+    - expression: >-
+        variables.volumes.all(v, v.name != 'kube-api'
+          || (has(v.projected) && has(v.projected.sources) && v.projected.sources.size() == 2
+              && v.projected.sources.all(s,
+                   (has(s.serviceAccountToken)
+                    && !(has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience != '')
+                    && has(s.serviceAccountToken.expirationSeconds)
+                    && s.serviceAccountToken.expirationSeconds <= 600)
+                   || (has(s.configMap) && s.configMap.name == 'kube-root-ca.crt'))
+              && v.projected.sources.exists(s, has(s.serviceAccountToken))
+              && v.projected.sources.exists(s, has(s.configMap))))
+      message: "the kube-api volume is a token of at most 600 seconds for the default audience, and the cluster CA"
     - expression: >-
         variables.volumes.all(v, v.name != 'script'
           || (has(v.secret) && has(v.secret.secretName) && ('Secret/' + v.secret.secretName) in variables.scripts)
@@ -164,3 +180,61 @@ spec:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: faubourg-credentials
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: faubourg-provider-tokens
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["serviceaccounts/token"]
+  # Only the bootstrap pods' requests; everyone else's TokenRequests are not this policy's.
+  matchConditions:
+    - name: from-the-bootstrap-pods
+      expression: "request.userInfo.username == 'system:serviceaccount:faubourg-credentials:faubourg-bootstrap'"
+  validations:
+    - expression: >-
+        has(params.data) && 'providerServiceAccountPrefix' in params.data
+        && params.data.providerServiceAccountPrefix.startsWith('banlieue-provider-')
+        && params.data.providerServiceAccountPrefix.endsWith('-')
+      message: "faubourg-bootstrap-policy must set providerServiceAccountPrefix to banlieue-provider-<class>-"
+    - expression: "request.name.startsWith(params.data.providerServiceAccountPrefix)"
+      message: "a bootstrap pod mints tokens only for a provider ServiceAccount of the configured class"
+    - expression: "has(object.spec.expirationSeconds) && object.spec.expirationSeconds <= 86400"
+      message: "a provider token lives at most a day"
+    # The API server fills in its own audiences before admission; anything else is refused.
+    - expression: >-
+        'apiAudiences' in params.data
+        && (!has(object.spec.audiences)
+            || object.spec.audiences.all(a, a in params.data.apiAudiences.split(',')))
+      message: "a provider token is for the API server's own audience (apiAudiences)"
+    # An unbound request arrives with an empty boundObjectRef, not without one.
+    - expression: >-
+        !has(object.spec.boundObjectRef)
+        || ((!has(object.spec.boundObjectRef.kind) || object.spec.boundObjectRef.kind == '')
+            && (!has(object.spec.boundObjectRef.name) || object.spec.boundObjectRef.name == ''))
+      message: "a provider token is bound to no object"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: faubourg-provider-tokens
+spec:
+  policyName: faubourg-provider-tokens
+  validationActions: ["Deny"]
+  paramRef:
+    name: faubourg-bootstrap-policy
+    namespace: faubourg-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: banlieue-system
