@@ -4,11 +4,10 @@
 # The Host controller (ADR-0009). One replica, Recreate: there is no leader election yet, and
 # every write it makes is idempotent, so a brief overlap during a rollout is safe.
 #
-# Apply after deploy/crds, deploy/rbac and deploy/admission. Set:
-#   - the controller image: not published yet (roadmap 01); replace the placeholder below;
-#   - FAUBOURG_BOOTSTRAP_IMAGE: the same digest-pinned image as `image` in
-#     deploy/admission/bootstrap-policy-params.yaml, or the API server refuses every Job.
-# The controller refuses to start with an image not pinned by digest.
+# Do not edit the image digests here: `make release-manifests` renders them, into this file and
+# into the admission policy's parameters at once (ADR-0012 decision 5), and a release ships the
+# result. The `<digest>` placeholders are not valid images, so an unrendered copy never runs.
+# The operator sets FAUBOURG_PROVIDER_API_SERVER: the controller refuses to start without it.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -54,6 +53,9 @@ spec:
               value: ConfigMap/faubourg-install
             - name: FAUBOURG_PROVIDER_NAMESPACE
               value: banlieue-system
+            # The API server address the hosts' providers use, https:// (ADR-0011).
+            - name: FAUBOURG_PROVIDER_API_SERVER
+              value: "" # rendered from PROVIDER_API_SERVER, or set by the operator
             - name: RUST_LOG
               value: info
           securityContext:

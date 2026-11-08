@@ -66,12 +66,14 @@ Job are still planned (accepted risk R-3 in the [threat model](docs/security/thr
 | Area | State |
 | --- | --- |
 | Architecture: [ADR-0001 … ADR-0011](docs/adr/README.md), [CALM](docs/architecture/diagrams/system.md), [threat model](docs/security/threat-model.md) | accepted |
+| [ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md): images signed and published by digest | proposed |
 | [`faubourg-api`](crates/faubourg-api/): CRDs, fail-closed validation, SSH Secret contract | implemented, tested |
 | [`faubourg-controller`](crates/faubourg-controller/): the Host reconciler ([ADR-0009](docs/adr/0009-host-reconciler.md)), its phase machine, `Provider` health and bootstrap Job builder | implemented, tested against a real API server with its own RBAC (`make controller-test`); no published image yet |
 | [Bootstrap admission policy](deploy/admission/) and [controller RBAC](deploy/rbac/) ([ADR-0008](docs/adr/0008-bootstrap-jobs-constrained-by-admission-policy.md)) | implemented, tested against a real API server (`make vap-test`) |
 | [Bootstrap image](images/bootstrap/) ([ADR-0010](docs/adr/0010-bootstrap-image.md)) | implemented, tested against a real OpenSSH host (`make bootstrap-test`); not published yet |
 | [Provider creation and the provider's credential](docs/adr/0011-the-hosts-provider-and-its-identity.md) | implemented, tested end to end on kind with the real image (`make e2e-test`) |
-| Published images, a run against a real hypervisor | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
+| [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented in CI; no release cut yet |
+| A run against a real hypervisor | in progress ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller and cordon | not started ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
@@ -82,6 +84,7 @@ The status board is [`ROADMAPS.md`](ROADMAPS.md).
 | Read | For |
 | --- | --- |
 | [Concepts](docs/concepts.md) | Zones, hosts, the phase machine, how a zone reaches banlieue's scheduler |
+| [Installing](docs/guides/installing.md) | Verifying a release's signatures, and applying its install file |
 | [Preparing a host](docs/guides/preparing-a-host.md) | The install script, the sudo rule, placement |
 | [SSH credentials](docs/guides/ssh-credentials.md) | Secret keys, host key policy, revoking the placement key |
 | [Placing VMs in a zone](docs/guides/zone-placement.md) | `providerSelector` for banlieue users |

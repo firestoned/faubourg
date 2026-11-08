@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-07**, against the architecture
-> defined by **ADR-0001 … ADR-0011** (all Accepted;
-> ADR-0002, ADR-0005, ADR-0007, ADR-0008 and ADR-0009 amended). Sixth pass: the shipped code is
+> defined by **ADR-0001 … ADR-0012** (ADR-0001 … ADR-0011 Accepted, ADR-0012 Proposed;
+> ADR-0002, ADR-0005, ADR-0007, ADR-0008 and ADR-0009 amended). Seventh pass: the shipped code is
 > `crates/faubourg-api` (types, validation, the SSH Secret contract, the Job-to-image
 > contract), `crates/faubourg-controller` (the Host reconciler and its binary) and
 > `crates/faubourg-bootstrap` (the bootstrap image's binary, on russh), with the admission
@@ -15,7 +15,9 @@ SPDX-License-Identifier: Apache-2.0
 > (`make controller-test`) and the image against a real OpenSSH host (`make bootstrap-test`)
 > are tested in CI, and a Host is bootstrapped end to end on kind with the real image, its
 > Provider created and its first provider token minted and delivered (`make e2e-test`; banlieue
-> simulated). No image is published yet, and nothing has run against a real hypervisor. Every control below that lives in a planned
+> simulated), installed from the rendered install file with the controller running as its
+> Deployment. CI builds, signs and publishes both images from `main` and releases (ADR-0012);
+> no release has been cut yet, and nothing has run against a real hypervisor. Every control below that lives in a planned
 > component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
@@ -45,7 +47,8 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Host controller (reconciler, binary) | shipped, tested on kind with its own RBAC; image not published | `crates/faubourg-controller/src/{plan,controller,config,main}.rs`, `deploy/controller/`, `scripts/controller-test.sh` |
 | Creating and labelling Providers (ADR-0011) | shipped, tested on kind | `crates/faubourg-controller/src/provider.rs`, `scripts/controller-test.sh`, `scripts/e2e-test.sh` |
 | Provider token minting and the `faubourg-provider-tokens` policy (ADR-0011) | shipped, tested on kind | `crates/faubourg-bootstrap/src/provider.rs`, `deploy/admission/bootstrap-policy.yaml`, `scripts/vap-test.sh` |
-| Bootstrap image (SSH client) | shipped as source and Containerfile, tested against OpenSSH; not published | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
+| Bootstrap image (SSH client) | shipped, tested against OpenSSH; published by CI from `main` (ADR-0012) | `crates/faubourg-bootstrap`, `images/bootstrap/Containerfile`, `scripts/bootstrap-test.sh` |
+| Image publication and the install file (ADR-0012) | shipped in CI; no release cut yet | `.github/workflows/build.yaml` (`images`, `release-manifests`), `images/`, `scripts/render-manifests.sh` |
 | Zone controller | planned, roadmap 02 | |
 
 ## 3. Assets
@@ -63,6 +66,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace and writes Host status. Cannot read a credential (ADR-0008), but can run the pinned image with any of them (R-5). |
 | A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
 | A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
+| A-12 The published images and the install file | The bootstrap image is the fleet's root of trust; the install file decides which digest the admission policy admits (ADR-0012). |
 
 ## 4. Actors
 
@@ -99,6 +103,9 @@ flowchart LR
         prov[banlieue provider]
     end
     prov -->|TB-5 outbound| kube
+    ci[CI: build.yaml on main and releases] -->|TB-7 signed images by digest| reg[(ghcr.io)]
+    ci -->|TB-7 signed install file| op
+    kube -.->|pulls by digest| reg
 ```
 
 - **TB-1** controllers → Kubernetes API: Hosts, zones, the Jobs and pods in the credentials
@@ -108,6 +115,8 @@ flowchart LR
 - **TB-4** install script → artifact repository (curl).
 - **TB-5** banlieue provider → Kubernetes API (banlieue's boundary; see its threat model).
 - **TB-6** bootstrap pod → Kubernetes API: TokenRequest for the host's provider (ADR-0011).
+- **TB-7** this repository's CI → the registry and the release → the operator's cluster: how an
+  image and the install file come to be trusted (ADR-0012).
 
 ## 6. STRIDE, per boundary
 
@@ -193,6 +202,17 @@ flowchart LR
 | The provider token reaches a server the attacker runs | I | A compromised controller can pair a password or first-use credential with an address of its choosing (R-5), and the token goes there. It is one provider's, for a day. A `knownHosts` key confines it to the pinned host. |
 | A pod cannot read its own credentials and fails in a way that hides a misconfiguration | D | `fsGroup` makes the root-owned Secret files readable by the bootstrap user (`job.rs`, `the_restricted_security_profile`); found by `e2e-test`, which runs the real image against real mounts. |
 
+### TB-7: CI → registry and release → the operator's cluster
+
+| Threat | STRIDE | Control |
+| --- | --- | --- |
+| A substituted or tampered image is installed | T | Images are pulled by digest only: `deploy/` holds `@sha256:<digest>` placeholders no runtime accepts, the render refuses an image not pinned by digest (`scripts/render-manifests.sh`, `render-manifests-test`), and the admission policy admits only the bootstrap digest the operator applied (ADR-0008). Each image is Cosign-signed keyless by digest and attested (`build.yaml`, `images`); `docs/guides/installing.md` gives the verification. |
+| A pull request, from a fork or a branch, publishes a signed image | E | Images are pushed and signed only on a push to `main` and on a release (`build.yaml`, `PUBLISH`); pull requests build without pushing. A `main` image's certificate names `refs/heads/main`, so the documented release identity refuses it. |
+| The controller runs one bootstrap digest and the policy admits another | T, D | Both come from one render, which fails unless the bootstrap image appears exactly twice (`render-manifests.sh`; `render-manifests-test`; `e2e-test` checks the running Deployment against the policy parameter). A mismatch fails closed anyway: the API server refuses every Job. |
+| A tampered install file | T | Signed with `cosign sign-blob` by the release workflow and attached with its bundle (`build.yaml`, `release-manifests`); `docs/guides/installing.md` verifies it against the release tag's identity. |
+| A release ships a known-vulnerable image | T | Trivy scans every pushed digest; a release fails on a CRITICAL or HIGH finding (`build.yaml`, `images`). |
+| A compromised release workflow or `main` publishes a signed malicious image | T, E | Not prevented here: commit signatures and DCO are verified, every action is SHA-pinned and the token is read-only except in the two jobs that need more. The operator still chooses which release digest to apply. Accepted, R-12. |
+
 ## 7. Hardening that exists today
 
 - No free-form arguments or shell in any CR field (`BootstrapSpec`).
@@ -218,6 +238,9 @@ flowchart LR
   unpinned image (`config.rs`).
 - The controller Deployment runs non-root, read-only root, all capabilities dropped,
   `RuntimeDefault` seccomp (`deploy/controller/deployment.yaml`).
+- Images: one static binary on `scratch`, built `--locked` on digest-pinned bases, pushed only
+  from `main` and releases, Cosign-signed keyless by digest, attested, SBOM'd and Trivy-scanned;
+  deployed only by digest from a signed install file (ADR-0012).
 - Supply chain: `banlieue-api` comes from crates.io, pinned to an exact version (`Cargo.toml`),
   and `cargo deny` refuses any git source or other registry (`deny.toml`, `[sources]`); the one
   non-code license, CDLA-Permissive-2.0, is allowed for `webpki-root-certs` only. russh is
@@ -235,7 +258,7 @@ flowchart LR
 | --- | --- | --- |
 | R-1 | Anyone who can write the script source (A-3) is root on every host at the next placement run. Mitigated by RBAC on that ConfigMap or Secret, and the allowlist (A-8) limits *which* objects can be a script, not what they contain. | Re-bootstrap on changed script content is designed (roadmap 01): decide then whether the script's digest is pinned in A-8 too. |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
-| R-3 | The controls marked planned above do not exist yet: Provider creation, published and signed images, and a run against a real hypervisor. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
+| R-3 | The controls marked planned above do not exist yet, no release has been cut, and nothing has run against a real hypervisor. faubourg must not be deployed before roadmap 01's pass closes them. | Roadmap 01's threat-model pass. |
 | R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
 | R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
 | R-7 | Whoever can label Providers in banlieue's namespace can attach a second one to a host, which makes it `ProviderAmbiguous` (fails closed), or label an adopted host's Provider before faubourg does. They can already create a Provider banlieue places on, so this grants nothing new. Narrowed by ADR-0011: faubourg now owns the label on the Provider it creates. | banlieue publishes which Provider a host is, rather than a label. |
@@ -243,6 +266,7 @@ flowchart LR
 | R-9 | The SSH implementation is russh, with far less review than OpenSSH (ADR-0010 consequences). Mitigated: exact pin, its own Dependabot group, cargo-audit, the host-key decision in faubourg's own tested code, and an image with nothing else to attack. | A russh advisory, or a published audit. |
 | R-10 | faubourg re-derives banlieue's provider ServiceAccount name; a change in banlieue's naming would make faubourg mint for the wrong name (refused, or a 404 until it times out), never a broader one, since the token policy's prefix still applies. | banlieue publishes the name (ADR-0011 consequences). |
 | R-11 | `apiAudiences` must name the API server's own audiences; wrong, and every provider token is refused (fails closed). | A distribution where the audience cannot be known in advance. |
+| R-12 | Whoever controls this repository's release workflow or `main` branch can publish a signed image (ADR-0012 consequences). Mitigated: signed commits, DCO, pinned actions, least-privilege jobs, release-only identity in verification, digest pinning at admission. | A second signer (a maintainer's key, or a reproducible build checked by another party). |
 | R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
@@ -272,3 +296,4 @@ flowchart LR
 | 2026-11-07 | 0001 … 0009 | Fourth pass: ADR-0009 (the Host reconciler, Accepted) and the ADR-0005 and ADR-0007 amendments. The reconciler, its binary and Deployment shipped, tested on kind with its own RBAC and in CI; A-9 and an actor added; A-6 widened to the host label; TB-1 rows for Job ownership, re-bootstrap inputs, retries, the zone gate, configuration, logs and Provider ambiguity; R-7 added; R-1 and R-3 revisited. R-3 stays open: no bootstrap image, no Provider creation, no published image. |
 | 2026-11-07 | 0001 … 0010 | Fifth pass: ADR-0010 (the bootstrap image, Accepted). The image's binary shipped on russh and is tested against OpenSSH in CI; the controller pins first-use keys from succeeded Jobs. TB-2 and TB-3 rewritten from planned to shipped controls: host-key judgement before authentication, constant commands, atomic placement, owner and mode in "in place", revoke, logs. R-8 (first use) and R-9 (russh) added; R-3 narrowed to Provider creation, published images and a real hypervisor. |
 | 2026-11-07 | 0001 … 0011 | Sixth pass: ADR-0011 (the host's Provider and its identity, Accepted) and the ADR-0005, ADR-0008 and ADR-0009 amendments. faubourg creates and labels Providers; the bootstrap pod mints the host's first provider token. A-10, A-11 and TB-6 added; TB-1 rows for Provider ownership, the External class and the identity gate; R-7 narrowed; R-10 (naming copy) and R-11 (audiences) added. `e2e-test` found and fixed two bugs: unreadable credentials (`fsGroup`), and Job events that never reached the cluster-scoped Host (`controller.rs`, `owner_host`; both kind tests now fail on it). R-3 stays open: no published image, no real hypervisor. |
+| 2026-11-07 | 0001 … 0012 | Seventh pass: ADR-0012 (images signed, published and deployed by digest, Proposed). TB-7 added for CI, the registry and the install file; A-12 and R-12 added; R-3 narrowed to a first release and a real hypervisor. `e2e-test` now installs the rendered file and runs the controller as its Deployment. |

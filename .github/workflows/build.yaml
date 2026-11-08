@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
 
 # Top-level GITHUB_TOKEN is read-only (OpenSSF Scorecard Token-Permissions).
-# No job here needs more.
+# The image and release jobs declare what they need, each with a comment (ADR-0012).
 permissions:
   contents: read
 
@@ -234,6 +234,149 @@ jobs:
       - name: CRDs match the Rust types
         run: make crds-check
 
+      - name: The install-file render refuses what it must
+        run: make render-manifests-test
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Images (ADR-0012): built on every event, which validates the Containerfiles.
+  # Pushed, Cosign-signed keyless, attested and Trivy-scanned only on a push to
+  # main and on a release; no pull request image ever carries this repository's
+  # signature. A release fails on a CRITICAL or HIGH finding.
+  # ─────────────────────────────────────────────────────────────────────────
+  images:
+    name: 🐳 Image - ${{ matrix.image }}
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    needs: [changes, license-check, verify-commits]
+    permissions:
+      contents: read
+      # Push to GHCR.
+      packages: write
+      # Keyless Cosign signing and build provenance use the workflow's OIDC identity.
+      id-token: write
+      attestations: write
+      # Trivy uploads SARIF to code scanning.
+      security-events: write
+    outputs:
+      digest-controller: ${{ steps.digest.outputs.digest-controller }}
+      digest-bootstrap: ${{ steps.digest.outputs.digest-bootstrap }}
+    env:
+      PUBLISH: ${{ github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [controller, bootstrap]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker (login + buildx)
+        uses: firestoned/github-actions/docker/setup-docker@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/faubourg-${{ matrix.image }}
+          flavor: |
+            latest=false
+          tags: |
+            type=sha,prefix=sha-,format=short,enable=${{ env.PUBLISH }}
+            type=raw,value=main-{{date 'YYYY-MM-DD'}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{version}},prefix=v,enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},prefix=v,enable=${{ github.event_name == 'release' }}
+
+      - name: Build, and push when publishing
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/${{ matrix.image }}/Containerfile
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          sbom: ${{ env.PUBLISH }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+
+      - name: Cosign sign (keyless, by digest)
+        if: env.PUBLISH == 'true'
+        uses: firestoned/github-actions/security/cosign-sign@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          image-digest: ${{ steps.build.outputs.digest }}
+          registry: ghcr.io
+          repository: ${{ github.repository_owner }}/faubourg-${{ matrix.image }}
+
+      - name: Build provenance attestation
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/faubourg-${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Trivy scan (a release fails on CRITICAL or HIGH)
+        if: env.PUBLISH == 'true'
+        uses: firestoned/github-actions/security/trivy-scan@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/faubourg-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          exit-code: ${{ github.event_name == 'release' && '1' || '0' }}
+          sarif-category: trivy-${{ matrix.image }}
+          upload-artifact-name: trivy-${{ matrix.image }}
+
+      - name: Export digest
+        id: digest
+        if: env.PUBLISH == 'true'
+        run: echo "digest-${{ matrix.image }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # The install file (ADR-0012 decisions 5 and 6): deploy/ rendered with both
+  # digests, signed with cosign sign-blob. An artifact on main; attached to the
+  # release on a release. A release without both digests fails.
+  # ─────────────────────────────────────────────────────────────────────────
+  release-manifests:
+    name: 📦 Release Manifests
+    if: github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    needs: [images]
+    permissions:
+      # Upload the rendered file to the release.
+      contents: write
+      # Keyless signing of the rendered file.
+      id-token: write
+    env:
+      CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/faubourg-controller@${{ needs.images.outputs.digest-controller }}
+      BOOTSTRAP_IMAGE: ghcr.io/${{ github.repository_owner }}/faubourg-bootstrap@${{ needs.images.outputs.digest-bootstrap }}
+      VERSION: ${{ github.event.release.tag_name || format('main-{0}', github.sha) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Render the install file
+        run: make release-manifests
+
+      - name: Sign the install file
+        uses: firestoned/github-actions/security/cosign-sign@f52366c4f57f0110012035ac1bcd0bee4075b3e9 # v1.4.0
+        with:
+          artifact-path: release/faubourg-${{ env.VERSION }}.yaml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: install-${{ env.VERSION }}
+          path: release/
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" "release/faubourg-$VERSION.yaml" "release/faubourg-$VERSION.yaml.bundle" --clobber
+
   # ─────────────────────────────────────────────────────────────────────────
   # Against real servers: the admission policy (ADR-0008) and the Host
   # controller with its own RBAC (ADR-0009), each on its own throwaway kind
@@ -319,7 +462,7 @@ jobs:
     name: ✅ Required Checks
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    needs: [license-check, verify-commits, dco, infra-identifiers, format, clippy, test, integration, security, cargo-deny]
+    needs: [license-check, verify-commits, dco, infra-identifiers, format, clippy, test, integration, images, security, cargo-deny]
     steps:
       - name: Assert no required job failed
         env:

@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # MkDocs
 site/
 .venv/
+
+# Rendered install files (make release-manifests)
+release/

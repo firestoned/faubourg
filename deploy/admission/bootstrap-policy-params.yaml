@@ -6,7 +6,8 @@
 # ConfigMaps there) cannot change the image or the allowlist. The controller has no ConfigMap
 # write anywhere. A platform administrator edits this.
 #
-#   image               the bootstrap image, pinned by digest (placeholder below)
+#   image               the bootstrap image, pinned by digest: rendered by
+#                       `make release-manifests` (ADR-0012), never edited by hand
 #   serviceAccountName  the bootstrap pods' ServiceAccount (TokenRequest on provider
 #                       ServiceAccounts only, ADR-0011)
 #   scriptSources       comma-separated, no spaces: ConfigMap/<name> or Secret/<name>
@@ -22,7 +23,7 @@ metadata:
   name: faubourg-bootstrap-policy
   namespace: faubourg-system
 data:
-  image: "ghcr.io/firestoned/faubourg-bootstrap@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  image: "ghcr.io/firestoned/faubourg-bootstrap@sha256:<digest>"
   serviceAccountName: faubourg-bootstrap
   scriptSources: "ConfigMap/faubourg-install"
   providerServiceAccountPrefix: "banlieue-provider-cloud-hypervisor-"

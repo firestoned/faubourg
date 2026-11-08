@@ -43,9 +43,9 @@ updates:
         patterns: ["*"]
         exclude-patterns: ["kube", "kube-*", "k8s-openapi", "russh", "russh-*", "ssh-key"]
 
-  # Base images, pinned by digest: the bootstrap image and the test sshd host.
+  # Base images, pinned by digest: the controller and bootstrap images, and the test sshd host.
   - package-ecosystem: "docker"
-    directories: ["/images/bootstrap", "/test/sshd"]
+    directories: ["/images/bootstrap", "/images/controller", "/test/sshd"]
     schedule:
       interval: "weekly"
     cooldown:

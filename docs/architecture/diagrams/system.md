@@ -38,6 +38,7 @@ flowchart LR
     service-banlieue-ch-provider["banlieue Cloud Hypervisor provider"]
     service-cloud-hypervisor["cloud-hypervisor (one per VM)"]
     network-host-mgmt["Host management network"]
+    data-asset-install-file["Install file (faubourg-<version>.yaml)"]
     subgraph sg_system-faubourg [System Faubourg]
         service-host-controller
         service-zone-controller
@@ -72,6 +73,8 @@ flowchart LR
     system-banlieue --> data-asset-provider-cr
     service-host-controller --> data-asset-provider-cr
     service-bootstrap-job -->|HTTPS| ecosystem-kube-api
+    ecosystem-kube-api -->|HTTPS| ecosystem-ghcr
+    actor-platform-operator --> data-asset-install-file
 ```
 
 <sub>Source: nodes and relationships in `architecture.json`.</sub>
