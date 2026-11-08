@@ -4,9 +4,9 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Threat Model
 
-> **Status:** Living document. Last full pass **2026-11-07**, against the architecture
+> **Status:** Living document. Last full pass **2026-11-08**, against the architecture
 > defined by **ADR-0001 … ADR-0012** (all Accepted;
-> ADR-0002, ADR-0005, ADR-0007, ADR-0008 and ADR-0009 amended). Seventh pass: the shipped code is
+> ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended). Seventh pass: the shipped code is
 > `crates/faubourg-api` (types, validation, the SSH Secret contract, the Job-to-image
 > contract), `crates/faubourg-controller` (the Host reconciler and its binary) and
 > `crates/faubourg-bootstrap` (the bootstrap image's binary, on russh), with the admission
@@ -19,7 +19,9 @@ SPDX-License-Identifier: Apache-2.0
 > Deployment. CI builds, signs and publishes both images from `main` and releases (ADR-0012);
 > no release has been cut yet, and nothing has run against a real hypervisor. The first live test (adoption on the core cluster)
 > found that placement did not create the run account on a fresh host; ADR-0010 is amended and
-> it does now. Every control below that lives in a planned
+> it does now. The second (bootstrapping that host from faubourg) found that a Host switched
+> from `Script` back to `None` could no longer label its Provider; ADR-0011 is amended and the
+> spec has its own field manager. Every control below that lives in a planned
 > component says so; nothing planned is written as though it exists.
 
 ## 1. What faubourg is, in security terms
@@ -146,10 +148,11 @@ flowchart LR
 | A Host bootstraps into a missing or `Shared` zone | T | No Job until the zone exists and validates (`phase.rs`, `a_missing_zone_holds_a_host_that_has_not_started`; `controller-test`). |
 | A Host name longer than a label value is truncated into another host's label | T | The CRD refuses names over 63 characters (CEL rule in `deploy/crds/faubourg.firestoned.io_hosts.yaml`; `controller-test`), and the builder refuses them too. |
 | The controller starts with an image by tag, or with a malformed namespace or script source | T | It refuses to start (`config.rs`, `the_image_is_required_and_must_be_pinned`, `a_malformed_default_script_is_refused`; `controller-test`: "the controller refuses an image by tag"). An image other than A-8's is refused by the API server anyway. |
-| Two controller instances race and write conflicting state | T | `replicas: 1`, `Recreate` (`deploy/controller/deployment.yaml`). Every write is idempotent: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller`. |
+| Two controller instances race and write conflicting state | T | `replicas: 1`, `Recreate` (`deploy/controller/deployment.yaml`). Every write is idempotent: Jobs by a name derived from the Host, status by server-side apply under `faubourg.firestoned.io/host-controller` (a bootstrapped host's Provider spec under `faubourg.firestoned.io/host-provider-spec`). |
 | A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
 | The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch`, `create`, `patch` on `providers.banlieue.io` only: no delete, no Secret, no `serviceaccounts/token` (`deploy/rbac/controller.yaml`; `vap-test` checks each). |
-| faubourg overwrites an adopted host's Provider, or deletes one | T, D | An adopted host's Provider gets labels only, by server-side apply, never its spec (`provider.rs`, `an_adopted_host_gets_labels_and_nothing_else`; `controller-test` checks faubourg owns no spec field). faubourg holds no delete on Providers and sets no ownerReference, so deleting a Host keeps its Provider (`controller-test`, `e2e-test`). |
+| faubourg overwrites an adopted host's Provider, or deletes one | T, D | An adopted host's Provider gets labels only, by server-side apply, never its spec (`provider.rs`, `every_host_gets_labels_and_nothing_else_under_the_labels_manager`, `spec_body`; `controller-test` checks faubourg owns no spec field). The one exception moves a spec a v0.1 controller left under the labels' manager to the spec manager, with its values unchanged (`provider.rs`, `migrated_spec_body`, `nothing_moves_unless_the_labels_manager_owns_the_spec`). faubourg holds no delete on Providers and sets no ownerReference, so deleting a Host keeps its Provider (`controller-test`, `e2e-test`). |
+| A Host switched from `Script` to `None` loses its Provider's spec, or can no longer be labelled (so a cordon never reaches banlieue) | D, T | The spec and the labels have separate field managers, the spec applied first and only for `Script`, so the labels' apply never leaves a spec field without a manager; the spec stays as faubourg last set it (ADR-0011, amended; `plan.rs`, `a_host_switched_to_none_stops_writing_the_spec_and_keeps_labelling`; `controller-test`: "switched to None, its Provider is still labelled", "a v0.1-owned Provider of an adopted Host is still labelled"). |
 | A Host bootstraps under a Managed class, so banlieue would also run an in-cluster provider for it | T | Only an `External` class: otherwise the Host is `Failed` and nothing is created (`plan.rs`, `a_class_that_is_missing_or_not_external_fails_the_host_and_creates_nothing`; `controller-test`). |
 | A Job runs before the provider has an identity, so the token request fails or targets a stale ServiceAccount | D | No Job until banlieue reports `status.workload.mode: External` (`plan.rs`, `no_job_until_banlieue_gives_the_provider_its_identity`; `controller-test`, `e2e-test`). |
 | A forged `Provider` status marks a host healthy | S | Out of faubourg's control: whoever can write `Provider` status is inside banlieue's trust boundary (banlieue's threat model). faubourg only reads it. |
@@ -301,3 +304,4 @@ flowchart LR
 | 2026-11-07 | 0001 … 0011 | Sixth pass: ADR-0011 (the host's Provider and its identity, Accepted) and the ADR-0005, ADR-0008 and ADR-0009 amendments. faubourg creates and labels Providers; the bootstrap pod mints the host's first provider token. A-10, A-11 and TB-6 added; TB-1 rows for Provider ownership, the External class and the identity gate; R-7 narrowed; R-10 (naming copy) and R-11 (audiences) added. `e2e-test` found and fixed two bugs: unreadable credentials (`fsGroup`), and Job events that never reached the cluster-scoped Host (`controller.rs`, `owner_host`; both kind tests now fail on it). R-3 stays open: no published image, no real hypervisor. |
 | 2026-11-07 | 0001 … 0012 | Seventh pass: ADR-0012 (images signed, published and deployed by digest, Accepted). TB-7 added for CI, the registry and the install file; A-12 and R-12 added; R-3 narrowed to a first release and a real hypervisor. `e2e-test` now installs the rendered file and runs the controller as its Deployment. |
 | 2026-11-08 | 0001 … 0012 | Pass for the ADR-0010 amendment found by the first live test: placement provisions the run account and its key on a fresh host. One TB-3 row added; no new boundary, asset or actor. The live adoption test confirmed R-11 on k0s (`apiAudiences` must be `https://kubernetes.default.svc`), now in the installing guide. |
+| 2026-11-08 | 0001 … 0012 | Pass for the ADR-0011 amendment found by the second live test (bootstrapping a fresh host from faubourg, which worked): a Host switched from `Script` to `None` could no longer label its Provider. The spec has its own field manager now. One TB-1 row added and one rewritten; no new boundary, asset, actor or permission (the controller's Role is unchanged). Header stamp bumped. R-3 is closed by roadmap 01's own pass. |

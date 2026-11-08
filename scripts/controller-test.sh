@@ -122,6 +122,7 @@ never() { # description, seconds, command...: the command must stay false for th
   done
   pass "$what"
 }
+not() { ! "$@"; }
 phase_is() { # host, phase[, reason]
   local got
   got="$(kubectl get host "$1" -o json 2>/dev/null \
@@ -171,6 +172,52 @@ echo "--- changed inputs replace the Job"
 kubectl patch host hv01 --type=merge -p "{\"spec\": {\"address\": \"$ADDR1B\"}}" >/dev/null
 eventually "the stale Job goes and a new one comes" 60 jobs_are hv01 "job.batch/bootstrap-hv01-g3 "
 
+echo "--- a bootstrapped Host switched to None keeps a valid Provider (ADR-0011, amended)"
+SPEC_MANAGER=faubourg.firestoned.io/host-provider-spec
+LABEL_MANAGER=faubourg.firestoned.io/host-controller
+owns_spec() { # provider, manager: that manager owns the class and the endpoint
+  kubectl -n "$BANLIEUE" get provider "$1" -o json --show-managed-fields | jq -e --arg m "$2" '
+    .metadata.managedFields | map(select(.manager == $m and .operation == "Apply"))
+    | any((.fieldsV1."f:spec" // {}) as $s
+          | ($s | has("f:providerClassRef")) and (($s."f:connection" // {}) | has("f:endpoint")))'
+}
+spec_kept() { # provider, endpoint
+  kubectl -n "$BANLIEUE" get provider "$1" -o json | jq -e --arg e "$2" '
+    .spec.providerClassRef.name == "cloud-hypervisor" and .spec.connection.endpoint == $e'
+}
+cordon_label() { # provider
+  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.faubourg\.firestoned\.io/cordoned}')" = true ]
+}
+host hv06 az1 hv06.home.example Script
+managers() { # provider: who owns what in its spec, for a failure's context
+  kubectl -n "$BANLIEUE" get provider "$1" -o json --show-managed-fields \
+    | jq -c '.metadata.managedFields[] | {manager, operation, subresource, spec: .fieldsV1."f:spec"}'
+}
+before=$failures
+eventually "a bootstrapped Host's Provider spec has its own field manager" 60 owns_spec hv06 "$SPEC_MANAGER"
+[ "$failures" -eq "$before" ] || managers hv06
+eventually "and the labels' manager owns no spec" 5 not owns_spec hv06 "$LABEL_MANAGER"
+kubectl patch host hv06 --type=merge -p '{"spec": {"bootstrap": {"method": "None"}, "cordoned": true}}' >/dev/null
+eventually "switched to None, its Provider is still labelled" 30 cordon_label hv06
+eventually "and keeps its class and endpoint" 5 spec_kept hv06 ch://hv06.home.example
+# A Provider as a v0.1 controller left it: spec and labels under one manager.
+host hv07 az1 hv07.home.example None
+kubectl apply --server-side --field-manager="$LABEL_MANAGER" -f - >/dev/null <<EOF
+{"apiVersion": "banlieue.io/v1alpha1", "kind": "Provider",
+ "metadata": {"name": "hv07", "namespace": "$BANLIEUE", "labels": {"faubourg.firestoned.io/host": "hv07"}},
+ "spec": {"providerClassRef": {"name": "cloud-hypervisor"}, "connection": {"endpoint": "ch://hv07.home.example"}}}
+EOF
+kubectl patch host hv07 --type=merge -p '{"spec": {"cordoned": true}}' >/dev/null
+eventually "a v0.1-owned Provider of an adopted Host is still labelled" 30 cordon_label hv07
+eventually "and keeps its class and endpoint" 5 spec_kept hv07 ch://hv07.home.example
+before=$failures
+eventually "its spec moved to the spec manager" 5 owns_spec hv07 "$SPEC_MANAGER"
+[ "$failures" -eq "$before" ] || managers hv07
+if grep -F 'reconcile failed' "$WORK/controller.log" | grep -q 'hv0[67]'; then
+  fail "the switched Hosts" "$(grep -F 'reconcile failed' "$WORK/controller.log" | grep 'hv0[67]' | head -2)"
+else pass "and neither reconcile failed"; fi
+kubectl delete host hv06 hv07 >/dev/null
+
 echo "--- the ProviderClass must be External"
 kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "Managed"}}' >/dev/null
 host hv05 az1 hv05.home.example Script
@@ -204,7 +251,7 @@ provider hv03
 eventually "the Host is Ready from a healthy Provider" 30 phase_is hv03 Ready ProviderHealthy
 eventually "faubourg labels the adopted Provider with its zone" 30 bash -c \
   "[ \"\$(kubectl -n $BANLIEUE get provider hv03 -o jsonpath='{.metadata.labels.faubourg\\.firestoned\\.io/zone}')\" = az1 ]"
-if kubectl -n "$BANLIEUE" get provider hv03 -o json \
+if kubectl -n "$BANLIEUE" get provider hv03 -o json --show-managed-fields \
    | jq -e '.metadata.managedFields | map(select(.manager == "faubourg.firestoned.io/host-controller")) | any(.fieldsV1 | has("f:spec"))' >/dev/null; then
   fail "the adopted Provider" "faubourg owns spec fields"
 else pass "and never writes its spec"; fi

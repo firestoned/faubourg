@@ -30,8 +30,8 @@ use crate::job::{
 };
 use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
 use crate::provider::{
-    REASON_AWAITING_IDENTITY, REASON_CLASS_NOT_EXTERNAL, apply_body as provider_body,
-    class_is_external, identity_ready,
+    REASON_AWAITING_IDENTITY, REASON_CLASS_NOT_EXTERNAL, class_is_external, identity_ready,
+    labels_body, migrated_spec_body, spec_body,
 };
 
 /// The Host condition the reconciler writes.
@@ -77,9 +77,13 @@ pub struct Plan {
     pub status_changed: bool,
     /// The phase decision `status` was built from.
     pub decision: Decision,
-    /// The server-side apply body for the host's Provider, if one is to be applied
-    /// (ADR-0011 decisions 2 and 3).
+    /// The labels' apply body for the host's Provider, under `LABELS_MANAGER`, if one is to
+    /// be applied (ADR-0011 decisions 2 and 3).
     pub apply_provider: Option<serde_json::Value>,
+    /// The spec's apply body, under `SPEC_MANAGER`, applied before the labels: a bootstrapped
+    /// Host's class and endpoint, or an existing spec moved off the labels' manager
+    /// (ADR-0011, amended).
+    pub apply_provider_spec: Option<serde_json::Value>,
 }
 
 /// Why no plan was made: the Host was not read from an API server.
@@ -144,17 +148,18 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
             message: "waiting for banlieue to give the host's Provider its identity".into(),
         };
     }
-    let apply_provider = if !valid || refusal.is_some() {
-        None
-    } else if script || w.own_provider.is_some() {
-        provider_body(
-            host,
-            w.zone,
-            &w.cfg.provider.class,
-            &w.cfg.provider.namespace,
+    let ns = &w.cfg.provider.namespace;
+    let (apply_provider_spec, apply_provider) = if !valid || refusal.is_some() {
+        (None, None)
+    } else if script {
+        (
+            spec_body(host, &w.cfg.provider.class, ns),
+            labels_body(host, w.zone, ns),
         )
+    } else if let Some(own) = w.own_provider {
+        (migrated_spec_body(own), labels_body(host, w.zone, ns))
     } else {
-        None
+        (None, None)
     };
 
     let delete = stale(&owned, current);
@@ -192,6 +197,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         status_changed,
         decision,
         apply_provider,
+        apply_provider_spec,
     })
 }
 
@@ -857,9 +863,34 @@ mod tests {
     #[test]
     fn a_bootstrapped_host_gets_its_provider_applied() {
         let p = Fixture::new(host(1)).plan();
-        let b = p.apply_provider.expect("the Provider is applied");
-        assert_eq!(b["metadata"]["name"], "hv01");
-        assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
+        let s = p.apply_provider_spec.expect("the Provider's spec is applied");
+        assert_eq!(s["metadata"]["name"], "hv01");
+        assert_eq!(s["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
+        let l = p.apply_provider.expect("and its labels");
+        assert!(l.get("spec").is_none());
+        assert_eq!(l["metadata"]["labels"]["faubourg.firestoned.io/host"], "hv01");
+    }
+
+    #[test]
+    fn a_host_switched_to_none_stops_writing_the_spec_and_keeps_labelling() {
+        let mut f = Fixture::new(adopted());
+        f.own_provider = Some(own(true));
+        let p = f.plan();
+        assert_eq!(p.apply_provider_spec, None, "the spec is left as it is");
+        assert!(p.apply_provider.is_some());
+        // As a v0.1 controller left it: the labels' manager owns the spec too.
+        let mut legacy = own(true);
+        legacy.metadata.managed_fields = Some(
+            serde_json::from_value(json!([{
+                "manager": crate::provider::LABELS_MANAGER, "operation": "Apply",
+                "fieldsV1": { "f:spec": { "f:providerClassRef": { "f:name": {} },
+                                          "f:connection": { "f:endpoint": {} } } }
+            }]))
+            .unwrap(),
+        );
+        f.own_provider = Some(legacy);
+        let s = f.plan().apply_provider_spec.expect("moved before the labels' apply");
+        assert_eq!(s["spec"]["connection"]["endpoint"], "ch://hv01.home.example");
     }
 
     #[test]
@@ -870,7 +901,7 @@ mod tests {
         assert_eq!(p.create, None);
         assert_eq!(p.decision.phase, HostPhase::Pending);
         assert_eq!(p.decision.reason, REASON_AWAITING_IDENTITY);
-        assert!(p.apply_provider.is_some(), "the Provider is created first");
+        assert!(p.apply_provider_spec.is_some(), "the Provider is created first");
         f.own_provider = Some(own(false));
         assert_eq!(f.plan().create, None);
         f.own_provider = Some(own(true));
@@ -887,6 +918,7 @@ mod tests {
             assert_eq!(p.decision.reason, REASON_CLASS_NOT_EXTERNAL);
             assert_eq!(p.create, None);
             assert_eq!(p.apply_provider, None);
+            assert_eq!(p.apply_provider_spec, None);
         }
     }
 
@@ -900,6 +932,7 @@ mod tests {
             "never created for an adopted host"
         );
         f.own_provider = Some(own(true));
+        assert_eq!(f.plan().apply_provider_spec, None, "never an adopted Provider's spec");
         let b = f.plan().apply_provider.unwrap();
         assert!(b.get("spec").is_none());
         assert_eq!(
@@ -918,5 +951,6 @@ mod tests {
         let mut f = Fixture::new(host(1));
         f.host.spec.address = "-oProxyCommand=sh".into();
         assert_eq!(f.plan().apply_provider, None);
+        assert_eq!(f.plan().apply_provider_spec, None);
     }
 }

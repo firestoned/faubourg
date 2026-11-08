@@ -48,6 +48,11 @@ faubourg owns exactly these labels on the `Provider`, under its own field manage
 A zone's `providerLabels` may not use the `faubourg.firestoned.io/` prefix, so a zone cannot
 move a host into another zone by overwriting the zone label.
 
+The labels are applied under `faubourg.firestoned.io/host-controller`. For a bootstrapped host,
+faubourg also sets the Provider's class and endpoint, under a second field manager,
+`faubourg.firestoned.io/host-provider-spec`. A host switched back to `bootstrap.method: None`
+keeps that spec as faubourg last set it; faubourg only stops writing it.
+
 ## Lifecycle of a host
 
 A `Host` moves through five phases ([ADR-0007](adr/0007-health-from-the-banlieue-provider.md)):

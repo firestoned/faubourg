@@ -7,8 +7,9 @@
 //! - An adopted Host's existing Provider gets the labels only.
 //! - faubourg never deletes one.
 //!
-//! Pure functions: the apply bodies are built here and sent by `controller.rs` under the
-//! Host controller's field manager.
+//! Pure functions: the apply bodies are built here and sent by `controller.rs`. The spec and
+//! the labels have separate field managers (ADR-0011, amended), so a Host switched from
+//! `Script` to `None` stops writing the spec without server-side apply removing it.
 
 use std::collections::BTreeMap;
 
@@ -17,6 +18,13 @@ use faubourg_api::host::{BootstrapMethod, Host};
 use faubourg_api::zone::AvailabilityZone;
 use faubourg_api::{LABEL_CORDONED, LABEL_HOST, LABEL_ZONE};
 use serde_json::{Value, json};
+
+/// The field manager for the labels faubourg owns on a Provider, and for everything else the
+/// Host controller writes.
+pub const LABELS_MANAGER: &str = "faubourg.firestoned.io/host-controller";
+/// The field manager for a bootstrapped Host's Provider spec: `providerClassRef` and
+/// `connection.endpoint`.
+pub const SPEC_MANAGER: &str = "faubourg.firestoned.io/host-provider-spec";
 
 /// Reason: the configured `ProviderClass` is missing or not `External` (ADR-0011 decision 1).
 pub const REASON_CLASS_NOT_EXTERNAL: &str = "ProviderClassNotExternal";
@@ -42,34 +50,74 @@ pub fn labels(host: &Host, zone: Option<&AvailabilityZone>) -> BTreeMap<String, 
     l
 }
 
-/// The server-side apply body for the host's Provider (ADR-0011 decisions 2 and 3): for a
-/// bootstrapped Host, class, endpoint and labels; for an adopted one, labels only. `None` for a
-/// Host with no name.
-pub fn apply_body(
-    host: &Host,
-    zone: Option<&AvailabilityZone>,
-    class: &str,
-    namespace: &str,
-) -> Option<Value> {
+/// The labels' apply body, under [`LABELS_MANAGER`], for every Host (ADR-0011 decisions 2
+/// and 3): the labels and nothing in `spec`. `None` for a Host with no name.
+pub fn labels_body(host: &Host, zone: Option<&AvailabilityZone>, namespace: &str) -> Option<Value> {
     let name = host.metadata.name.as_deref()?;
-    let metadata = json!({ "name": name, "namespace": namespace, "labels": labels(host, zone) });
-    let body = match host.spec.bootstrap.method {
-        BootstrapMethod::Script => json!({
-            "apiVersion": "banlieue.io/v1alpha1",
-            "kind": "Provider",
-            "metadata": metadata,
-            "spec": {
-                "providerClassRef": { "name": class },
-                "connection": { "endpoint": format!("ch://{}", host.spec.address) },
-            },
-        }),
-        BootstrapMethod::None => json!({
-            "apiVersion": "banlieue.io/v1alpha1",
-            "kind": "Provider",
-            "metadata": metadata,
-        }),
-    };
-    Some(body)
+    Some(json!({
+        "apiVersion": "banlieue.io/v1alpha1",
+        "kind": "Provider",
+        "metadata": { "name": name, "namespace": namespace, "labels": labels(host, zone) },
+    }))
+}
+
+/// The spec's apply body, under [`SPEC_MANAGER`], for a bootstrapped Host (ADR-0011 decision
+/// 2): class and endpoint (`ch://<address>`). `None` for an adopted Host, whose spec faubourg
+/// never sets, and for a Host with no name.
+pub fn spec_body(host: &Host, class: &str, namespace: &str) -> Option<Value> {
+    if host.spec.bootstrap.method != BootstrapMethod::Script {
+        return None;
+    }
+    let name = host.metadata.name.as_deref()?;
+    Some(spec_apply(
+        name,
+        namespace,
+        class,
+        &format!("ch://{}", host.spec.address),
+    ))
+}
+
+/// For a Provider whose spec the labels' manager still owns, as a v0.1 controller left it:
+/// its current class and endpoint, unchanged, for [`SPEC_MANAGER`] to take over before the
+/// labels' apply would remove them (ADR-0011, amended). `None` otherwise.
+pub fn migrated_spec_body(provider: &Provider) -> Option<Value> {
+    let owned = provider
+        .metadata
+        .managed_fields
+        .iter()
+        .flatten()
+        .filter(|m| {
+            m.manager.as_deref() == Some(LABELS_MANAGER)
+                && m.operation.as_deref() == Some("Apply")
+                && m.subresource.as_deref().is_none_or(str::is_empty)
+        })
+        .filter_map(|m| m.fields_v1.as_ref())
+        .any(|f| {
+            let spec = &f.0["f:spec"];
+            spec.get("f:providerClassRef").is_some()
+                || spec["f:connection"].get("f:endpoint").is_some()
+        });
+    if !owned {
+        return None;
+    }
+    Some(spec_apply(
+        provider.metadata.name.as_deref()?,
+        provider.metadata.namespace.as_deref()?,
+        &provider.spec.provider_class_ref.name,
+        &provider.spec.connection.endpoint,
+    ))
+}
+
+fn spec_apply(name: &str, namespace: &str, class: &str, endpoint: &str) -> Value {
+    json!({
+        "apiVersion": "banlieue.io/v1alpha1",
+        "kind": "Provider",
+        "metadata": { "name": name, "namespace": namespace },
+        "spec": {
+            "providerClassRef": { "name": class },
+            "connection": { "endpoint": endpoint },
+        },
+    })
 }
 
 /// True when the class exists and is `External` (banlieue ADR-0060 decision 3).
@@ -135,36 +183,85 @@ mod tests {
     }
 
     #[test]
-    fn a_bootstrapped_host_gets_class_endpoint_and_labels() {
-        let z = zone(&json!({ "topology.home.example/rack": "r1" }), "Local");
-        let b = apply_body(
+    fn a_bootstrapped_host_gets_class_and_endpoint_under_the_spec_manager() {
+        let b = spec_body(
             &host(BootstrapMethod::Script),
-            Some(&z),
             "cloud-hypervisor",
             "banlieue-system",
         )
         .unwrap();
         assert_eq!(b["metadata"]["name"], "hv01");
         assert_eq!(b["metadata"]["namespace"], "banlieue-system");
+        assert!(b["metadata"].get("labels").is_none(), "labels are the other manager's");
         assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
         assert_eq!(
             b["spec"]["connection"]["endpoint"],
             "ch://hv01.home.example"
         );
-        let l = &b["metadata"]["labels"];
-        assert_eq!(l[LABEL_ZONE], "az1");
-        assert_eq!(l[LABEL_HOST], "hv01");
-        assert_eq!(l["topology.home.example/rack"], "r1");
-        assert!(l.get(LABEL_CORDONED).is_none());
         // The body parses as a Provider: what the API server will validate.
         let _: Provider = serde_json::from_value(b).unwrap();
+        assert_eq!(
+            spec_body(&host(BootstrapMethod::None), "cloud-hypervisor", "ns"),
+            None,
+            "never an adopted Provider's spec"
+        );
     }
 
     #[test]
-    fn an_adopted_host_gets_labels_and_nothing_else() {
-        let b = apply_body(&host(BootstrapMethod::None), None, "cloud-hypervisor", "ns").unwrap();
-        assert!(b.get("spec").is_none(), "never an adopted Provider's spec");
-        assert_eq!(b["metadata"]["labels"][LABEL_HOST], "hv01");
+    fn every_host_gets_labels_and_nothing_else_under_the_labels_manager() {
+        let z = zone(&json!({ "topology.home.example/rack": "r1" }), "Local");
+        for method in [BootstrapMethod::Script, BootstrapMethod::None] {
+            let b = labels_body(&host(method), Some(&z), "banlieue-system").unwrap();
+            assert!(b.get("spec").is_none(), "{method:?}: no spec");
+            assert_eq!(b["metadata"]["namespace"], "banlieue-system");
+            let l = &b["metadata"]["labels"];
+            assert_eq!(l[LABEL_ZONE], "az1");
+            assert_eq!(l[LABEL_HOST], "hv01");
+            assert_eq!(l["topology.home.example/rack"], "r1");
+            assert!(l.get(LABEL_CORDONED).is_none());
+        }
+        assert_ne!(SPEC_MANAGER, LABELS_MANAGER);
+    }
+
+    fn managed(entries: &Value) -> Provider {
+        let mut p = provider(&json!({}));
+        p.metadata.managed_fields = Some(serde_json::from_value(entries.clone()).unwrap());
+        p
+    }
+
+    fn spec_fields() -> Value {
+        json!({ "f:spec": { "f:providerClassRef": { "f:name": {} },
+                            "f:connection": { "f:endpoint": {} } } })
+    }
+
+    #[test]
+    fn a_spec_the_labels_manager_still_owns_is_moved_unchanged() {
+        let p = managed(&json!([
+            { "manager": LABELS_MANAGER, "operation": "Apply", "fieldsV1": spec_fields() }
+        ]));
+        let b = migrated_spec_body(&p).expect("moved to the spec manager");
+        assert_eq!(b["metadata"]["name"], "hv01");
+        assert_eq!(b["metadata"]["namespace"], "banlieue-system");
+        assert_eq!(b["spec"]["providerClassRef"]["name"], "cloud-hypervisor");
+        assert_eq!(b["spec"]["connection"]["endpoint"], "ch://hv01.home.example");
+        assert!(b["metadata"].get("labels").is_none());
+    }
+
+    #[test]
+    fn nothing_moves_unless_the_labels_manager_owns_the_spec() {
+        for entries in [
+            json!([]),
+            json!([{ "manager": LABELS_MANAGER, "operation": "Apply",
+                     "fieldsV1": { "f:metadata": { "f:labels": {} } } }]),
+            json!([{ "manager": SPEC_MANAGER, "operation": "Apply", "fieldsV1": spec_fields() }]),
+            json!([{ "manager": "kubectl", "operation": "Apply", "fieldsV1": spec_fields() }]),
+            json!([{ "manager": LABELS_MANAGER, "operation": "Update", "fieldsV1": spec_fields() }]),
+            json!([{ "manager": LABELS_MANAGER, "operation": "Apply", "subresource": "status",
+                     "fieldsV1": spec_fields() }]),
+        ] {
+            assert_eq!(migrated_spec_body(&managed(&entries)), None, "{entries}");
+        }
+        assert_eq!(migrated_spec_body(&provider(&json!({}))), None, "no managedFields");
     }
 
     #[test]
