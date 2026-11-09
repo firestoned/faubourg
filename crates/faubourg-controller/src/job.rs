@@ -40,7 +40,6 @@ use crate::phase::{JobFailure, JobState};
 
 // The contract with the bootstrap image lives in faubourg-api, so the builder and the image
 // cannot disagree on it (ADR-0010).
-use faubourg_api::banlieue::provider_service_account;
 pub use faubourg_api::bootstrap::{
     CONTAINER, ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT,
     ENV_PROVIDER, ENV_PROVIDER_API_SERVER, ENV_PROVIDER_CA_SHA256, ENV_PROVIDER_NAMESPACE,
@@ -252,10 +251,6 @@ pub fn bootstrap_job(
         literal(ENV_SCRIPT_SHA256, digest),
         literal(ENV_PROVIDER, name),
         literal(ENV_PROVIDER_NAMESPACE, &cfg.provider.namespace),
-        literal(
-            ENV_PROVIDER_SERVICE_ACCOUNT,
-            &provider_service_account(&cfg.provider.class, name),
-        ),
         literal(ENV_PROVIDER_API_SERVER, &cfg.provider.api_server),
     ]);
 
@@ -292,6 +287,24 @@ pub fn bootstrap_job(
         spec: Some(job_spec(labels, pod)),
         status: None,
     })
+}
+
+/// `job`, given the `ServiceAccount` its token is minted for, as banlieue publishes it on the
+/// host's Provider (banlieue ADR-0126). Not a bootstrap input: a Job is only created once the
+/// name is known, and the name does not change which Job is the Host's current one.
+#[must_use]
+pub fn with_provider_identity(mut job: Job, service_account: &str) -> Job {
+    if let Some(c) = job
+        .spec
+        .as_mut()
+        .and_then(|s| s.template.spec.as_mut())
+        .and_then(|p| p.containers.first_mut())
+    {
+        c.env
+            .get_or_insert_default()
+            .push(literal(ENV_PROVIDER_SERVICE_ACCOUNT, service_account));
+    }
+    job
 }
 
 /// The sha256 of a Host's bootstrap inputs, as the Job's [`ANNOTATION_INPUTS`] carries it
@@ -804,8 +817,29 @@ mod tests {
         }]
     }
 
+    /// The name banlieue publishes for the fixture Host's Provider.
+    const SA: &str = "banlieue-provider-cloud-hypervisor-hv01";
+
     fn build(h: &Host) -> Job {
-        bootstrap_job(h, &cfg(), Some(&policy(pins()))).expect("a Job")
+        with_provider_identity(
+            bootstrap_job(h, &cfg(), Some(&policy(pins()))).expect("a Job"),
+            SA,
+        )
+    }
+
+    #[test]
+    fn the_provider_identity_is_banlieues_and_not_an_input() {
+        let bare = bootstrap_job(&host(), &cfg(), Some(&policy(pins()))).unwrap();
+        assert!(
+            !env(&bare).contains_key(ENV_PROVIDER_SERVICE_ACCOUNT),
+            "faubourg derives no name"
+        );
+        let j = with_provider_identity(bare.clone(), "whatever-banlieue-named-it");
+        assert_eq!(
+            env(&j).get(ENV_PROVIDER_SERVICE_ACCOUNT),
+            Some(&Some("whatever-banlieue-named-it".to_string()))
+        );
+        assert_eq!(job_inputs(&j), job_inputs(&bare));
     }
 
     fn pod(j: &Job) -> &PodSpec {

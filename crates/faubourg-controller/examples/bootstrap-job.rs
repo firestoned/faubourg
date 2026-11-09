@@ -16,7 +16,9 @@ use faubourg_api::host::{
     SecretName, SshSpec,
 };
 use faubourg_api::policy::parse_policy;
-use faubourg_controller::job::{BootstrapConfig, ProviderConfig, bootstrap_job};
+use faubourg_controller::job::{
+    BootstrapConfig, ProviderConfig, bootstrap_job, with_provider_identity,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = std::env::var("FAUBOURG_BOOTSTRAP_IMAGE")
@@ -64,7 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         max_rebootstraps: 1,
     };
-    let job = bootstrap_job(&host, &cfg, Some(&pins)).map_err(|e| e.to_string())?;
+    // The name banlieue's operator would publish on the Provider (banlieue ADR-0126).
+    let job = with_provider_identity(
+        bootstrap_job(&host, &cfg, Some(&pins)).map_err(|e| e.to_string())?,
+        "banlieue-provider-cloud-hypervisor-hv01",
+    );
     println!("{}", serde_json::to_string_pretty(&job)?);
     Ok(())
 }

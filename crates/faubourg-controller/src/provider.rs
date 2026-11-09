@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment, WorkloadMode};
 use faubourg_api::host::{BootstrapMethod, Host};
+use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
 use faubourg_api::{LABEL_BANLIEUE_UNSCHEDULABLE, LABEL_CORDONED, LABEL_HOST, LABEL_ZONE};
 use serde_json::{Value, json};
@@ -128,13 +129,22 @@ pub fn class_is_external(class: Option<&ProviderClass>) -> bool {
     class.is_some_and(|c| c.spec.deployment_mode() == ProviderDeployment::External)
 }
 
-/// True once banlieue's operator has given the Provider its identity, which it reports as
-/// `status.workload.mode: External`.
+/// True once banlieue's operator has given the Provider its identity: `status.workload.mode:
+/// External`, and the `ServiceAccount`'s name published (banlieue ADR-0126).
 pub fn identity_ready(provider: Option<&Provider>) -> bool {
+    provider_service_account(provider).is_some()
+}
+
+/// The name of the `ServiceAccount` banlieue created for an External Provider, as its operator
+/// publishes it in `status.workload.serviceAccountName` (banlieue ADR-0126). faubourg never
+/// derives it; a name that is not a valid object name is no name.
+pub fn provider_service_account(provider: Option<&Provider>) -> Option<&str> {
     provider
         .and_then(|p| p.status.as_ref())
         .and_then(|s| s.workload.as_ref())
-        .is_some_and(|w| w.mode == WorkloadMode::External)
+        .filter(|w| w.mode == WorkloadMode::External)
+        .and_then(|w| w.service_account_name.as_deref())
+        .filter(|n| is_dns_subdomain(n))
 }
 
 #[cfg(test)]
@@ -341,14 +351,27 @@ mod tests {
     }
 
     #[test]
-    fn the_identity_is_ready_once_banlieue_reports_external() {
+    fn the_identity_is_ready_once_banlieue_reports_external_and_names_it() {
+        let sa = "banlieue-provider-cloud-hypervisor-hv01";
         assert!(!identity_ready(None));
         assert!(!identity_ready(Some(&provider(&json!({})))));
-        assert!(!identity_ready(Some(&provider(
-            &json!({ "workload": { "mode": "Managed", "namespace": "banlieue-system" } })
-        ))));
-        assert!(identity_ready(Some(&provider(
-            &json!({ "workload": { "mode": "External", "namespace": "banlieue-system" } })
-        ))));
+        assert!(!identity_ready(Some(&provider(&json!({ "workload": {
+            "mode": "Managed", "namespace": "banlieue-system", "serviceAccountName": sa } })))));
+        assert!(
+            !identity_ready(Some(&provider(&json!({ "workload": {
+                "mode": "External", "namespace": "banlieue-system" } })))),
+            "an operator older than banlieue ADR-0126 names nothing: wait, never guess"
+        );
+        let p = provider(&json!({ "workload": {
+            "mode": "External", "namespace": "banlieue-system", "serviceAccountName": sa } }));
+        assert!(identity_ready(Some(&p)));
+        assert_eq!(provider_service_account(Some(&p)), Some(sa));
+        let bad = provider(&json!({ "workload": {
+            "mode": "External", "namespace": "banlieue-system", "serviceAccountName": "-x y" } }));
+        assert_eq!(
+            provider_service_account(Some(&bad)),
+            None,
+            "a malformed name is no name"
+        );
     }
 }

@@ -27,12 +27,12 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use crate::health::ProviderHealth;
 use crate::job::{
     BootstrapConfig, JobError, LABEL_REBOOTSTRAP, bootstrap_job, job_generation, job_inputs,
-    job_state, owned_by, reported_host_key,
+    job_state, owned_by, reported_host_key, with_provider_identity,
 };
 use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
 use crate::provider::{
     REASON_AWAITING_IDENTITY, REASON_CLASS_NOT_EXTERNAL, class_is_external, identity_ready,
-    labels_body, migrated_spec_body, spec_body,
+    labels_body, migrated_spec_body, provider_service_account, spec_body,
 };
 
 /// The Host condition the reconciler writes.
@@ -188,15 +188,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         [one] => one.metadata.name.clone(),
         _ => None,
     };
-    let create = create.map(|mut j| {
-        if rebootstrap {
-            j.metadata
-                .labels
-                .get_or_insert_default()
-                .insert(LABEL_REBOOTSTRAP.into(), "true".into());
-        }
-        j
-    });
+    let create = create.and_then(|j| finish(j, w.own_provider, rebootstrap));
     let bootstrap = (script && want.is_some()).then_some(bootstrap_condition(job, hold));
     let status = status(
         host.status.as_ref(),
@@ -328,6 +320,19 @@ fn phase(
         };
     }
     (refusal, decision)
+}
+
+/// The Job to create, completed: the `ServiceAccount` banlieue published for the host's Provider
+/// (banlieue ADR-0126; the identity gate holds until it has), and the re-bootstrap mark the
+/// rollout counts (ADR-0013 decision 5).
+fn finish(mut job: Job, own_provider: Option<&Provider>, rebootstrap: bool) -> Option<Job> {
+    if rebootstrap {
+        job.metadata
+            .labels
+            .get_or_insert_default()
+            .insert(LABEL_REBOOTSTRAP.into(), "true".into());
+    }
+    provider_service_account(own_provider).map(|sa| with_provider_identity(job, sa))
 }
 
 /// Where a Host is in its bootstraps (ADR-0013 decision 5).
@@ -733,7 +738,8 @@ mod tests {
     /// The Provider named after the Host, with or without its identity.
     fn own(identity: bool) -> Provider {
         let status = if identity {
-            json!({ "workload": { "mode": "External", "namespace": "banlieue-system" } })
+            json!({ "workload": { "mode": "External", "namespace": "banlieue-system",
+                                  "serviceAccountName": "banlieue-provider-cloud-hypervisor-hv01" } })
         } else {
             json!({})
         };

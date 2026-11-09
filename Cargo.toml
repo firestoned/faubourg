@@ -27,7 +27,7 @@ faubourg-api = { path = "crates/faubourg-api" }
 # banlieue is pre-1.0 and any release can change a schema, so a change reaches faubourg only
 # when this pin moves (a Dependabot PR), and then fails to compile instead of drifting at
 # runtime. Move it in step with the kube pin below.
-banlieue-api = "=0.5.3"
+banlieue-api = "=0.5.5"
 
 # kubernetes. Pinned to the same majors as banlieue-api (kube ~5.0, k8s-openapi 0.29), which
 # this project consumes for the Provider type (ADR-0002). Two kube majors in one graph break

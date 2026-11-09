@@ -22,6 +22,10 @@ parameters and the controller's environment, written by the same render.
 - banlieue installed, with an `External` ProviderClass for Cloud Hypervisor
   ([ADR-0011](../adr/0011-the-hosts-provider-and-its-identity.md)).
 
+faubourg needs banlieue v0.5.5 or later: it reads each host's provider ServiceAccount name
+from the Provider's status, which older banlieue does not publish. With an older banlieue,
+bootstrapped Hosts wait at `AwaitingProviderIdentity`; adopted ones are unaffected.
+
 ## 1. Verify the release
 
 Check the install file's signature: it was signed by this repository's release workflow, for
