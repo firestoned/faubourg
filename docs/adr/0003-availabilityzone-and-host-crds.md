@@ -42,3 +42,9 @@ scheduler input if every host's `Provider` carries the zone as a label.
   selectors; changing it after the first release is a breaking change.
 - Open: whether banlieue should grow a first-class zone attribute on failure domains instead
   of a label convention.
+
+*Amended 2026-11-09, after banlieue ADR-0124:* decision 5's cordon is no longer advisory. A
+cordoned Host's `Provider` also carries banlieue's own cordon label, `banlieue.io/unschedulable:
+"true"`, which banlieue's scheduler (v0.5.3 on) enforces for every new placement while leaving
+the VMs already there in place. faubourg owns that label as it owns its own: it comes and goes
+with `cordoned`, and a zone's `providerLabels` may not set it.

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment, WorkloadMode};
 use faubourg_api::host::{BootstrapMethod, Host};
 use faubourg_api::zone::AvailabilityZone;
-use faubourg_api::{LABEL_CORDONED, LABEL_HOST, LABEL_ZONE};
+use faubourg_api::{LABEL_BANLIEUE_UNSCHEDULABLE, LABEL_CORDONED, LABEL_HOST, LABEL_ZONE};
 use serde_json::{Value, json};
 
 /// The field manager for the labels faubourg owns on a Provider, and for everything else the
@@ -32,7 +32,8 @@ pub const REASON_CLASS_NOT_EXTERNAL: &str = "ProviderClassNotExternal";
 pub const REASON_AWAITING_IDENTITY: &str = "AwaitingProviderIdentity";
 
 /// The labels faubourg owns on a host's Provider: the zone's `providerLabels`, then the zone,
-/// the host and, while cordoned, the cordon label. `providerLabels` cannot set a key under
+/// the host and, while cordoned, faubourg's cordon label and banlieue's (`banlieue.io/unschedulable`,
+/// which banlieue's scheduler enforces). `providerLabels` cannot set a key under
 /// `faubourg.firestoned.io/` (the zone's validation refuses it), and faubourg's own are
 /// written last regardless.
 pub fn labels(host: &Host, zone: Option<&AvailabilityZone>) -> BTreeMap<String, String> {
@@ -46,6 +47,8 @@ pub fn labels(host: &Host, zone: Option<&AvailabilityZone>) -> BTreeMap<String, 
     }
     if host.spec.cordoned {
         l.insert(LABEL_CORDONED.into(), "true".into());
+        // banlieue's scheduler keeps every new VM off it (banlieue ADR-0124).
+        l.insert(LABEL_BANLIEUE_UNSCHEDULABLE.into(), "true".into());
     }
     l
 }
@@ -276,14 +279,29 @@ mod tests {
 
     #[test]
     fn a_cordoned_host_is_labelled_and_the_label_goes_with_the_cordon() {
-        let mut h = host(BootstrapMethod::Script);
-        h.spec.cordoned = true;
+        for method in [BootstrapMethod::Script, BootstrapMethod::None] {
+            let mut h = host(method);
+            h.spec.cordoned = true;
+            for key in [LABEL_CORDONED, LABEL_BANLIEUE_UNSCHEDULABLE] {
+                assert_eq!(
+                    labels(&h, None).get(key).map(String::as_str),
+                    Some("true"),
+                    "{method:?} {key}"
+                );
+            }
+            h.spec.cordoned = false;
+            for key in [LABEL_CORDONED, LABEL_BANLIEUE_UNSCHEDULABLE] {
+                assert!(!labels(&h, None).contains_key(key), "{method:?} {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn faubourgs_copy_of_banlieues_cordon_label_matches_banlieue() {
         assert_eq!(
-            labels(&h, None).get(LABEL_CORDONED).map(String::as_str),
-            Some("true")
+            LABEL_BANLIEUE_UNSCHEDULABLE,
+            banlieue_api::banlieue::LABEL_UNSCHEDULABLE
         );
-        h.spec.cordoned = false;
-        assert!(!labels(&h, None).contains_key(LABEL_CORDONED));
     }
 
     #[test]

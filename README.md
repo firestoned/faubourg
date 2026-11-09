@@ -74,7 +74,7 @@ exists; read its accepted risks before deploying, and expect the API to change b
 | [Provider creation and the provider's credential](docs/adr/0011-the-hosts-provider-and-its-identity.md) | implemented, tested end to end on kind with the real image (`make e2e-test`) |
 | [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented; v0.1.0 and v0.1.1 released and verified |
 | A run against a real hypervisor | done: one host adopted, then bootstrapped from nothing ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
-| Zone controller ([ADR-0015](docs/adr/0015-zone-controller.md)) and cordon | zone health implemented, tested on kind (`make controller-test`); cordon advisory until banlieue skips cordoned Providers ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
+| Zone controller ([ADR-0015](docs/adr/0015-zone-controller.md)) and cordon | implemented: zone health, and a cordon banlieue enforces (banlieue v0.5.3 and later), tested on kind ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
 The status board is [`ROADMAPS.md`](ROADMAPS.md).
