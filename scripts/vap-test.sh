@@ -176,6 +176,43 @@ done
 admit "and the pinned entry admits it again" "$GOOD" "${AS[@]}"
 deny "a writable mount" "mounted read-only" "$(mut "$C.volumeMounts[0].readOnly = false")" "${AS[@]}"
 
+echo "--- the provider CA (ADR-0016)"
+printf -- '-----BEGIN CERTIFICATE-----\nTHE LOAD BALANCER\n-----END CERTIFICATE-----\n' >"$WORK/lb.pem"
+kubectl -n "$CREDS" create configmap api-ca --from-file=lb.pem="$WORK/lb.pem" >/dev/null
+CA_SOURCE="ConfigMap/api-ca/lb.pem@sha256:$(sha256sum "$WORK/lb.pem" | cut -d' ' -f1)"
+params_key() { # key, value: apply it, then wait until the API server uses it (it admits $3)
+  kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+    -p "{\"data\": {\"$1\": \"$2\"}}" >/dev/null
+  for _ in $(seq 1 30); do submit "$3" "${AS[@]}" >/dev/null 2>&1 && return 0; sleep 1; done
+}
+WITH_CA="$(cd "$ROOT" && FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" FAUBOURG_SCRIPT_SOURCES="$SOURCES" \
+  FAUBOURG_PROVIDER_CA_SOURCE="$CA_SOURCE" cargo run -q -p faubourg-controller --example bootstrap-job \
+  | jq -c 'del(.metadata.ownerReferences)')"
+deny "a provider CA the policy does not pin" "provider-ca volume" "$WITH_CA" "${AS[@]}"
+params_key providerCASource "$CA_SOURCE" "$WITH_CA"
+admit "the controller's Job with the pinned provider CA" "$WITH_CA" "${AS[@]}"
+mca() { jq -c "$1" <<<"$WITH_CA"; }
+CA_ENV='(.spec.template.spec.containers[0].env[] | select(.name == "FAUBOURG_PROVIDER_CA_SHA256"))'
+CA_VOL='(.spec.template.spec.volumes[] | select(.name == "provider-ca"))'
+deny "a provider CA digest the policy does not pin" "provider-ca volume" \
+  "$(mca "$CA_ENV.value = \"$(printf '0%.0s' $(seq 64))\"")" "${AS[@]}"
+deny "the provider CA without its digest" "provider-ca volume" \
+  "$(mca "$C.env |= map(select(.name != \"FAUBOURG_PROVIDER_CA_SHA256\"))")" "${AS[@]}"
+deny "a second provider CA digest" "provider-ca volume" \
+  "$(mca "$C.env += [{\"name\": \"FAUBOURG_PROVIDER_CA_SHA256\", \"value\": \"$(printf '0%.0s' $(seq 64))\"}]")" "${AS[@]}"
+deny "the digest without the provider CA" "provider-ca volume" \
+  "$(mca "$P.volumes |= map(select(.name != \"provider-ca\")) | $C.volumeMounts |= map(select(.name != \"provider-ca\"))")" "${AS[@]}"
+deny "another ConfigMap as the provider CA" "provider-ca volume" \
+  "$(mca "$CA_VOL.configMap.name = \"faubourg-install\"")" "${AS[@]}"
+deny "a Secret as the provider CA" "provider-ca volume" \
+  "$(mca "$CA_VOL |= {name, secret: {secretName: \"hv02-ssh\", items: [{key: \"username\", path: \"ca.crt\"}]}}")" "${AS[@]}"
+kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+  -p '{"data": {"providerCASource": "Secret/api-ca/lb.pem"}}' >/dev/null
+for _ in $(seq 1 30); do submit "$GOOD" "${AS[@]}" >/dev/null 2>&1 || break; sleep 1; done
+deny "a malformed providerCASource refuses every Job" "providerCASource is empty or one" "$GOOD" "${AS[@]}"
+params_key providerCASource "" "$GOOD"
+admit "and without one, Jobs run as before" "$GOOD" "${AS[@]}"
+
 echo "--- the kube-api volume (ADR-0011)"
 K='(.spec.template.spec.volumes[] | select(.name == "kube-api"))'
 deny "a long-lived kube-api token" "kube-api volume is a token" \

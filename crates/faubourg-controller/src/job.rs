@@ -19,7 +19,7 @@ use faubourg_api::host::{
     BootstrapMethod, Host, HostKeyPolicy, HostSpec, HostStatus, ScriptRef, ScriptSourceKind,
     SshSpec,
 };
-use faubourg_api::policy::{PinnedScript, pinned_digest};
+use faubourg_api::policy::{PinnedScript, Policy, pinned_digest};
 use faubourg_api::validation::Invalid;
 use faubourg_api::{GROUP, LABEL_HOST, VERSION};
 use k8s_openapi::api::batch::v1::{
@@ -43,11 +43,13 @@ use crate::phase::{JobFailure, JobState};
 use faubourg_api::banlieue::provider_service_account;
 pub use faubourg_api::bootstrap::{
     CONTAINER, ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT,
-    ENV_PROVIDER, ENV_PROVIDER_API_SERVER, ENV_PROVIDER_NAMESPACE, ENV_PROVIDER_SERVICE_ACCOUNT,
-    ENV_REVOKE_PLACEMENT, ENV_SCRIPT_SHA256, EXIT_HOST_KEY_REFUSED, EXIT_SCRIPT_DRIFT,
-    EXIT_SCRIPT_UNPINNED, KUBE_API_CA_FILE, KUBE_API_TOKEN_FILE, KUBE_API_TOKEN_SECONDS,
-    KUBE_ROOT_CA_CONFIGMAP, MOUNT_CREDENTIALS, MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_SCRIPT,
-    SCRIPT_FILE, VOLUME_CREDENTIALS, VOLUME_KUBE_API, VOLUME_PLACEMENT, VOLUME_SCRIPT,
+    ENV_PROVIDER, ENV_PROVIDER_API_SERVER, ENV_PROVIDER_CA_SHA256, ENV_PROVIDER_NAMESPACE,
+    ENV_PROVIDER_SERVICE_ACCOUNT, ENV_REVOKE_PLACEMENT, ENV_SCRIPT_SHA256, EXIT_HOST_KEY_REFUSED,
+    EXIT_PROVIDER_CA_UNPINNED, EXIT_SCRIPT_DRIFT, EXIT_SCRIPT_UNPINNED, KUBE_API_CA_FILE,
+    KUBE_API_TOKEN_FILE, KUBE_API_TOKEN_SECONDS, KUBE_ROOT_CA_CONFIGMAP, MOUNT_CREDENTIALS,
+    MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_PROVIDER_CA, MOUNT_SCRIPT, PROVIDER_CA_FILE,
+    SCRIPT_FILE, VOLUME_CREDENTIALS, VOLUME_KUBE_API, VOLUME_PLACEMENT, VOLUME_PROVIDER_CA,
+    VOLUME_SCRIPT,
 };
 use faubourg_api::bootstrap::{Report, is_fingerprint};
 
@@ -191,7 +193,7 @@ pub fn is_digest_pinned(image: &str) -> bool {
 pub fn bootstrap_job(
     host: &Host,
     cfg: &BootstrapConfig,
-    pins: Option<&[PinnedScript]>,
+    policy: Option<&Policy>,
 ) -> Result<Job, JobError> {
     let spec = &host.spec;
     if spec.bootstrap.method != BootstrapMethod::Script {
@@ -224,10 +226,17 @@ pub fn bootstrap_job(
         .as_ref()
         .or(cfg.default_script.as_ref())
         .ok_or(JobError::NoScriptSource)?;
-    let digest = pinned(pins, script)?;
+    let digest = pinned(policy, script)?;
+    let provider_ca = policy.and_then(|p| p.provider_ca.as_ref());
     // validate() refuses Script without ssh, so this cannot fail; fail closed regardless.
     let ssh = spec.ssh.as_ref().ok_or(JobError::NotPersisted("ssh"))?;
-    let inputs = inputs_hash(&spec.address, ssh, script, digest);
+    let inputs = inputs_hash(
+        &spec.address,
+        ssh,
+        script,
+        digest,
+        provider_ca.map(|c| c.sha256.as_str()),
+    );
 
     let labels: BTreeMap<String, String> = [
         (LABEL_HOST, name),
@@ -250,16 +259,10 @@ pub fn bootstrap_job(
         literal(ENV_PROVIDER_API_SERVER, &cfg.provider.api_server),
     ]);
 
-    let mut volumes = vec![secret_volume(VOLUME_CREDENTIALS, &ssh.secret_ref.name)];
-    let mut mounts = vec![read_only(VOLUME_CREDENTIALS, MOUNT_CREDENTIALS)];
-    if let Some(p) = &ssh.placement_secret_ref {
-        volumes.push(secret_volume(VOLUME_PLACEMENT, &p.name));
-        mounts.push(read_only(VOLUME_PLACEMENT, MOUNT_PLACEMENT));
+    if let Some(ca) = provider_ca {
+        env.push(literal(ENV_PROVIDER_CA_SHA256, &ca.sha256));
     }
-    volumes.push(script_volume(script));
-    mounts.push(read_only(VOLUME_SCRIPT, MOUNT_SCRIPT));
-    volumes.push(kube_api_volume());
-    mounts.push(read_only(VOLUME_KUBE_API, MOUNT_KUBE_API));
+    let (volumes, mounts) = volumes_and_mounts(ssh, script, provider_ca);
 
     let pod = pod_spec(
         container(&cfg.image, env, mounts),
@@ -299,25 +302,27 @@ pub fn bootstrap_job(
 pub fn bootstrap_inputs(
     spec: &HostSpec,
     default_script: Option<&ScriptRef>,
-    pins: Option<&[PinnedScript]>,
+    policy: Option<&Policy>,
 ) -> Option<String> {
     if spec.bootstrap.method != BootstrapMethod::Script {
         return None;
     }
     let script = spec.bootstrap.script_ref.as_ref().or(default_script)?;
-    let digest = pinned(pins, script).ok()?;
+    let digest = pinned(policy, script).ok()?;
+    let provider_ca = policy.and_then(|p| p.provider_ca.as_ref());
     Some(inputs_hash(
         &spec.address,
         spec.ssh.as_ref()?,
         script,
         digest,
+        provider_ca.map(|c| c.sha256.as_str()),
     ))
 }
 
 /// The digest the bootstrap policy pins for `script` (ADR-0013 decision 2).
-fn pinned<'a>(pins: Option<&'a [PinnedScript]>, script: &ScriptRef) -> Result<&'a str, JobError> {
-    let pins = pins.ok_or(JobError::ScriptNotPinned(PinState::PolicyUnreadable))?;
-    pinned_digest(pins, script).ok_or(JobError::ScriptNotPinned(PinState::NotPinned))
+fn pinned<'a>(policy: Option<&'a Policy>, script: &ScriptRef) -> Result<&'a str, JobError> {
+    let policy = policy.ok_or(JobError::ScriptNotPinned(PinState::PolicyUnreadable))?;
+    pinned_digest(&policy.scripts, script).ok_or(JobError::ScriptNotPinned(PinState::NotPinned))
 }
 
 /// The canonical encoding is `serde_json` of this struct: field order is declaration order.
@@ -329,15 +334,26 @@ struct Inputs<'a> {
     ssh: &'a SshSpec,
     script: &'a ScriptRef,
     script_sha256: &'a str,
+    // Absent when no provider CA is pinned, so the encoding, and every Host's inputs, are
+    // unchanged for a cluster that does not use one (ADR-0016).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_ca_sha256: Option<&'a str>,
 }
 
-fn inputs_hash(address: &str, ssh: &SshSpec, script: &ScriptRef, script_sha256: &str) -> String {
+fn inputs_hash(
+    address: &str,
+    ssh: &SshSpec,
+    script: &ScriptRef,
+    script_sha256: &str,
+    provider_ca_sha256: Option<&str>,
+) -> String {
     // Serializing plain strings, numbers and enums into a Vec cannot fail.
     let bytes = serde_json::to_vec(&Inputs {
         address,
         ssh,
         script,
         script_sha256,
+        provider_ca_sha256,
     })
     .unwrap_or_default();
     Sha256::digest(&bytes)
@@ -441,6 +457,8 @@ fn failure(job: &Job, pods: &[Pod]) -> JobFailure {
         JobFailure::HostKeyRefused
     } else if codes.contains(&EXIT_SCRIPT_UNPINNED) {
         JobFailure::ScriptUnpinned
+    } else if codes.contains(&EXIT_PROVIDER_CA_UNPINNED) {
+        JobFailure::ProviderCaUnpinned
     } else {
         JobFailure::Other
     }
@@ -550,6 +568,7 @@ fn job_spec(labels: BTreeMap<String, String>, pod: PodSpec) -> JobSpec {
                         EXIT_SCRIPT_DRIFT,
                         EXIT_HOST_KEY_REFUSED,
                         EXIT_SCRIPT_UNPINNED,
+                        EXIT_PROVIDER_CA_UNPINNED,
                     ],
                 }),
                 on_pod_conditions: None,
@@ -590,6 +609,50 @@ fn secret_volume(volume: &str, secret: &str) -> Volume {
             secret_name: Some(secret.into()),
             default_mode: Some(0o400),
             ..SecretVolumeSource::default()
+        }),
+        ..Volume::default()
+    }
+}
+
+/// The Job's volumes and the container's read-only mounts of them: the credentials, the
+/// placement credential if any, the script, the provider CA if pinned (ADR-0016), and the pod's
+/// own `kube-api` access.
+fn volumes_and_mounts(
+    ssh: &SshSpec,
+    script: &ScriptRef,
+    provider_ca: Option<&PinnedScript>,
+) -> (Vec<Volume>, Vec<VolumeMount>) {
+    let mut volumes = vec![secret_volume(VOLUME_CREDENTIALS, &ssh.secret_ref.name)];
+    let mut mounts = vec![read_only(VOLUME_CREDENTIALS, MOUNT_CREDENTIALS)];
+    if let Some(p) = &ssh.placement_secret_ref {
+        volumes.push(secret_volume(VOLUME_PLACEMENT, &p.name));
+        mounts.push(read_only(VOLUME_PLACEMENT, MOUNT_PLACEMENT));
+    }
+    volumes.push(script_volume(script));
+    mounts.push(read_only(VOLUME_SCRIPT, MOUNT_SCRIPT));
+    if let Some(ca) = provider_ca {
+        volumes.push(provider_ca_volume(&ca.source));
+        mounts.push(read_only(VOLUME_PROVIDER_CA, MOUNT_PROVIDER_CA));
+    }
+    volumes.push(kube_api_volume());
+    mounts.push(read_only(VOLUME_KUBE_API, MOUNT_KUBE_API));
+    (volumes, mounts)
+}
+
+/// The pinned CA bundle's one key, as `ca.crt`. Always a `ConfigMap`: a CA is not secret, and
+/// the policy parser refuses anything else.
+fn provider_ca_volume(r: &ScriptRef) -> Volume {
+    Volume {
+        name: VOLUME_PROVIDER_CA.into(),
+        config_map: Some(ConfigMapVolumeSource {
+            name: r.name.clone(),
+            items: Some(vec![KeyToPath {
+                key: r.key.clone(),
+                path: PROVIDER_CA_FILE.into(),
+                ..KeyToPath::default()
+            }]),
+            default_mode: Some(0o444),
+            ..ConfigMapVolumeSource::default()
         }),
         ..Volume::default()
     }
@@ -674,6 +737,7 @@ fn quantities(pairs: &[(&str, &str)]) -> BTreeMap<String, Quantity> {
 mod tests {
     use super::*;
     use faubourg_api::host::{BootstrapSpec, DEFAULT_SCRIPT_KEY, HostSpec, SecretName};
+    use faubourg_api::policy::PinnedScript;
 
     const IMAGE: &str = "ghcr.io/firestoned/faubourg-bootstrap@sha256:\
                          0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -726,6 +790,13 @@ mod tests {
     /// The default script, pinned as the bootstrap policy would (ADR-0013).
     const SCRIPT_SHA256: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
+    fn policy(scripts: Vec<PinnedScript>) -> Policy {
+        Policy {
+            scripts,
+            provider_ca: None,
+        }
+    }
+
     fn pins() -> Vec<PinnedScript> {
         vec![PinnedScript {
             source: cfg().default_script.unwrap(),
@@ -734,7 +805,7 @@ mod tests {
     }
 
     fn build(h: &Host) -> Job {
-        bootstrap_job(h, &cfg(), Some(&pins())).expect("a Job")
+        bootstrap_job(h, &cfg(), Some(&policy(pins()))).expect("a Job")
     }
 
     fn pod(j: &Job) -> &PodSpec {
@@ -809,7 +880,7 @@ mod tests {
         let mut h = host();
         h.spec.bootstrap.method = BootstrapMethod::None;
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::NotScript)
         );
     }
@@ -819,7 +890,7 @@ mod tests {
         let mut h = host();
         h.spec.address = "-oProxyCommand=sh".into();
         assert!(matches!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::InvalidSpec(_))
         ));
     }
@@ -829,19 +900,19 @@ mod tests {
         let mut h = host();
         h.metadata.uid = None;
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::NotPersisted("uid"))
         );
         let mut h = host();
         h.metadata.generation = None;
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::NotPersisted("generation"))
         );
         let mut h = host();
         h.metadata.name = None;
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::NotPersisted("name"))
         );
     }
@@ -851,7 +922,7 @@ mod tests {
         let mut h = host();
         h.metadata.name = Some("h".repeat(64));
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&pins())),
+            bootstrap_job(&h, &cfg(), Some(&policy(pins()))),
             Err(JobError::NameTooLong)
         );
     }
@@ -863,7 +934,7 @@ mod tests {
             ..cfg()
         };
         assert_eq!(
-            bootstrap_job(&host(), &c, Some(&pins())),
+            bootstrap_job(&host(), &c, Some(&policy(pins()))),
             Err(JobError::NoScriptSource)
         );
     }
@@ -883,7 +954,7 @@ mod tests {
                 ..cfg()
             };
             assert_eq!(
-                bootstrap_job(&host(), &c, Some(&pins())),
+                bootstrap_job(&host(), &c, Some(&policy(pins()))),
                 Err(JobError::ImageNotPinned),
                 "{image}"
             );
@@ -961,7 +1032,8 @@ mod tests {
             vec![
                 EXIT_SCRIPT_DRIFT,
                 EXIT_HOST_KEY_REFUSED,
-                EXIT_SCRIPT_UNPINNED
+                EXIT_SCRIPT_UNPINNED,
+                EXIT_PROVIDER_CA_UNPINNED
             ]
         );
     }
@@ -1111,7 +1183,7 @@ mod tests {
             source: h.spec.bootstrap.script_ref.clone().unwrap(),
             sha256: SCRIPT_SHA256.into(),
         });
-        let j = bootstrap_job(&h, &cfg(), Some(&pinned)).unwrap();
+        let j = bootstrap_job(&h, &cfg(), Some(&policy(pinned))).unwrap();
         let v = volume(&j, VOLUME_SCRIPT).unwrap();
         assert!(v.config_map.is_none());
         let s = v.secret.as_ref().unwrap();
@@ -1210,7 +1282,11 @@ mod tests {
     // ----- bootstrap inputs, ownership, state (ADR-0009) ----------------------------------
 
     fn inputs(h: &Host) -> Option<String> {
-        bootstrap_inputs(&h.spec, cfg().default_script.as_ref(), Some(&pins()))
+        bootstrap_inputs(
+            &h.spec,
+            cfg().default_script.as_ref(),
+            Some(&policy(pins())),
+        )
     }
 
     #[test]
@@ -1248,7 +1324,7 @@ mod tests {
         let mut other = cfg();
         other.image = IMAGE.replace("0123", "4567");
         assert_eq!(
-            bootstrap_job(&h, &other, Some(&pins()))
+            bootstrap_job(&h, &other, Some(&policy(pins())))
                 .unwrap()
                 .metadata
                 .annotations
@@ -1295,13 +1371,83 @@ mod tests {
         repinned[0].sha256 = SCRIPT_SHA256.replace("fedc", "0123");
         let h = host();
         assert_ne!(
-            bootstrap_inputs(&h.spec, cfg().default_script.as_ref(), Some(&repinned)),
+            bootstrap_inputs(
+                &h.spec,
+                cfg().default_script.as_ref(),
+                Some(&policy(repinned))
+            ),
             base,
             "a re-pin is a new input (ADR-0013 decision 3)"
         );
         assert_eq!(
             env(&build(&h)).get(ENV_SCRIPT_SHA256),
             Some(&Some(SCRIPT_SHA256.to_string()))
+        );
+    }
+
+    const CA_SHA256: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+    fn with_ca() -> Policy {
+        Policy {
+            scripts: pins(),
+            provider_ca: Some(PinnedScript {
+                source: ScriptRef {
+                    kind: ScriptSourceKind::ConfigMap,
+                    name: "api-ca".into(),
+                    key: "lb.pem".into(),
+                },
+                sha256: CA_SHA256.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_pinned_provider_ca_is_mounted_read_only_with_its_digest() {
+        let j = bootstrap_job(&host(), &cfg(), Some(&with_ca())).unwrap();
+        let v = volume(&j, VOLUME_PROVIDER_CA).expect("the provider CA volume");
+        let cm = v.config_map.as_ref().expect("a ConfigMap, never a Secret");
+        assert_eq!(cm.name, "api-ca");
+        let items = cm.items.as_deref().unwrap();
+        assert_eq!(
+            (items[0].key.as_str(), items[0].path.as_str()),
+            ("lb.pem", PROVIDER_CA_FILE)
+        );
+        let mounts = container(&j).volume_mounts.as_deref().unwrap();
+        let m = mounts
+            .iter()
+            .find(|m| m.name == VOLUME_PROVIDER_CA)
+            .unwrap();
+        assert_eq!(
+            (m.mount_path.as_str(), m.read_only),
+            (MOUNT_PROVIDER_CA, Some(true))
+        );
+        assert_eq!(
+            env(&j).get(ENV_PROVIDER_CA_SHA256),
+            Some(&Some(CA_SHA256.to_string()))
+        );
+        let plain = build(&host());
+        assert!(
+            volume(&plain, VOLUME_PROVIDER_CA).is_none(),
+            "none without a pin"
+        );
+        assert!(!env(&plain).contains_key(ENV_PROVIDER_CA_SHA256));
+    }
+
+    #[test]
+    fn the_provider_ca_digest_is_an_input() {
+        let h = host();
+        let with = bootstrap_inputs(&h.spec, cfg().default_script.as_ref(), Some(&with_ca()));
+        assert_ne!(
+            with,
+            inputs(&h),
+            "setting a CA re-bootstraps (ADR-0016 decision 2)"
+        );
+        let mut other = with_ca();
+        other.provider_ca.as_mut().unwrap().sha256 = CA_SHA256.replace("abcd", "1234");
+        assert_ne!(
+            bootstrap_inputs(&h.spec, cfg().default_script.as_ref(), Some(&other)),
+            with,
+            "so does changing it"
         );
     }
 
@@ -1314,13 +1460,13 @@ mod tests {
             "no readable policy, no Job"
         );
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&[])),
+            bootstrap_job(&h, &cfg(), Some(&policy(vec![]))),
             Err(JobError::ScriptNotPinned(PinState::NotPinned))
         );
         let mut other_key = pins();
         other_key[0].source.key = "other.sh".into();
         assert_eq!(
-            bootstrap_job(&h, &cfg(), Some(&other_key)),
+            bootstrap_job(&h, &cfg(), Some(&policy(other_key))),
             Err(JobError::ScriptNotPinned(PinState::NotPinned)),
             "the key is part of the pin"
         );
@@ -1336,7 +1482,7 @@ mod tests {
         h.spec.bootstrap.method = BootstrapMethod::None;
         assert_eq!(inputs(&h), None);
         let h = host();
-        assert_eq!(bootstrap_inputs(&h.spec, None, Some(&pins())), None);
+        assert_eq!(bootstrap_inputs(&h.spec, None, Some(&policy(pins()))), None);
     }
 
     #[test]
@@ -1435,6 +1581,7 @@ mod tests {
             (EXIT_SCRIPT_DRIFT, JobFailure::ScriptDrift),
             (EXIT_HOST_KEY_REFUSED, JobFailure::HostKeyRefused),
             (EXIT_SCRIPT_UNPINNED, JobFailure::ScriptUnpinned),
+            (EXIT_PROVIDER_CA_UNPINNED, JobFailure::ProviderCaUnpinned),
             (1, JobFailure::Other),
         ] {
             assert_eq!(

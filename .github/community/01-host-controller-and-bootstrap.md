@@ -26,5 +26,5 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
 - [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
 - [ ] Ask banlieue to publish the provider ServiceAccount name (status or `banlieue-api`), and drop faubourg's copy of its naming
-- [ ] A CA option for hosts that reach the API server through another certificate authority
+- [x] A CA option for hosts that reach the API server through another certificate authority: `providerCASource`, pinned by digest in the bootstrap policy, checked by the policy and the image (exit 67), written into the host's kubeconfig (ADR-0016)
 - [x] Threat-model pass after stage 2 closes R-3 (eighth pass; R-13 added)

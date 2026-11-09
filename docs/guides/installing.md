@@ -71,6 +71,19 @@ Edit the install file before applying it:
 
   Separate several sources with commas. A source and key appear once.
 
+  If your hosts reach the API server through something that presents another certificate
+  than the cluster's (a load balancer terminating TLS), also pin the CA they should trust,
+  as `providerCASource` ([ADR-0016](../adr/0016-provider-api-ca.md)). Left empty, they trust
+  the cluster CA:
+
+  ```sh
+  kubectl -n faubourg-credentials create configmap api-ca --from-file=ca.pem=lb-ca.pem
+  echo "ConfigMap/api-ca/ca.pem@sha256:$(sha256sum lb-ca.pem | cut -d' ' -f1)"
+  ```
+
+  Changing it later re-bootstraps every host, one at a time, so each gets a kubeconfig that
+  trusts the new CA.
+
   The shipped `apiAudiences` is kubeadm's and kind's. k0s, for one, issues
   `https://kubernetes.default.svc`. Read yours from a short-lived token; if it is wrong, every
   provider token is refused:

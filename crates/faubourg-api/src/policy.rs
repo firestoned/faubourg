@@ -13,6 +13,45 @@ use crate::validation::is_dns_subdomain;
 
 /// The policy parameter holding the pinned script sources.
 pub const SCRIPT_SOURCES_KEY: &str = "scriptSources";
+/// The policy parameter pinning the CA the hosts trust for the API server (ADR-0016).
+pub const PROVIDER_CA_SOURCE_KEY: &str = "providerCASource";
+
+/// What the bootstrap policy's parameters pin: the scripts, and optionally the CA the hosts
+/// trust for the API server.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// The pinned install scripts (ADR-0013).
+    pub scripts: Vec<PinnedScript>,
+    /// The pinned CA bundle, a `ConfigMap` key; `None` means the cluster CA (ADR-0016).
+    pub provider_ca: Option<PinnedScript>,
+}
+
+/// Parses the two parameters. `provider_ca` empty or absent means the cluster CA.
+///
+/// # Errors
+/// [`PolicyError`] for a malformed or repeated script entry, or a provider CA that is not one
+/// pinned `ConfigMap/<name>/<key>@sha256:<64 lowercase hex>`.
+pub fn parse_policy(
+    script_sources: &str,
+    provider_ca: Option<&str>,
+) -> Result<Policy, PolicyError> {
+    let scripts = parse_script_sources(script_sources)?;
+    let provider_ca = match provider_ca.filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => {
+            let pin = parse_entry(s).ok_or(PolicyError::MalformedProviderCa)?;
+            // A CA bundle is not secret: only a ConfigMap may hold it.
+            if pin.source.kind != ScriptSourceKind::ConfigMap {
+                return Err(PolicyError::MalformedProviderCa);
+            }
+            Some(pin)
+        }
+    };
+    Ok(Policy {
+        scripts,
+        provider_ca,
+    })
+}
 
 /// One pinned script: a source, the key a Job mounts, and the sha256 of that key's content.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +71,9 @@ pub enum PolicyError {
     /// A source and key appear twice: only one script may be pinned per source.
     #[error("scriptSources entry {0} pins a source and key already pinned")]
     Repeated(usize),
+    /// `providerCASource` is not one `ConfigMap/<name>/<key>@sha256:<64 lowercase hex>`.
+    #[error("providerCASource is not ConfigMap/<name>/<key>@sha256:<64 lowercase hex>")]
+    MalformedProviderCa,
 }
 
 /// Parses `scriptSources`. An empty value pins nothing.
@@ -195,6 +237,38 @@ mod tests {
             .is_ok(),
             "another key of the same source is another script"
         );
+    }
+
+    #[test]
+    fn no_provider_ca_means_the_cluster_ca() {
+        for none in [None, Some("")] {
+            let p = parse_policy("", none).unwrap();
+            assert_eq!(p.provider_ca, None, "{none:?}");
+        }
+    }
+
+    #[test]
+    fn a_provider_ca_is_one_pinned_configmap_key() {
+        let p = parse_policy("", Some(&format!("ConfigMap/api-ca/ca.crt@sha256:{A}"))).unwrap();
+        assert_eq!(
+            p.provider_ca,
+            Some(PinnedScript {
+                source: r(ScriptSourceKind::ConfigMap, "api-ca", "ca.crt"),
+                sha256: A.into()
+            })
+        );
+        for bad in [
+            format!("Secret/api-ca/ca.crt@sha256:{A}"),
+            "ConfigMap/api-ca/ca.crt".to_string(),
+            "ConfigMap/api-ca/ca.crt@sha256:<your-ca-sha256>".to_string(),
+            format!("ConfigMap/api-ca/ca.crt@sha256:{A},ConfigMap/b/ca.crt@sha256:{B}"),
+        ] {
+            assert_eq!(
+                parse_policy("", Some(&bad)),
+                Err(PolicyError::MalformedProviderCa),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

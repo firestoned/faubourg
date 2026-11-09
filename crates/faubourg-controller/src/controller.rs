@@ -13,7 +13,7 @@ use std::time::Duration;
 use banlieue_api::banlieue::{Provider, ProviderClass};
 use faubourg_api::LABEL_HOST;
 use faubourg_api::host::Host;
-use faubourg_api::policy::{PinnedScript, SCRIPT_SOURCES_KEY, parse_script_sources};
+use faubourg_api::policy::{PROVIDER_CA_SOURCE_KEY, Policy, SCRIPT_SOURCES_KEY, parse_policy};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
 use futures::StreamExt;
@@ -247,20 +247,19 @@ fn bootstrap_jobs() -> String {
     )
 }
 
-/// The script pins in the bootstrap policy's parameters; `None` when they are missing or
-/// malformed, which fails every bootstrapped Host closed (ADR-0013 decision 2).
-fn pins(params: Option<ConfigMap>) -> Option<Vec<PinnedScript>> {
-    let Some(sources) = params
-        .and_then(|cm| cm.data)
-        .and_then(|mut d| d.remove(SCRIPT_SOURCES_KEY))
-    else {
+/// What the bootstrap policy's parameters pin; `None` when they are missing or malformed,
+/// which fails every bootstrapped Host closed (ADR-0013 decision 2, ADR-0016).
+fn pins(params: Option<ConfigMap>) -> Option<Policy> {
+    let mut data = params.and_then(|cm| cm.data).unwrap_or_default();
+    let Some(sources) = data.remove(SCRIPT_SOURCES_KEY) else {
         warn!("the bootstrap policy's parameters have no scriptSources");
         return None;
     };
-    match parse_script_sources(&sources) {
+    let provider_ca = data.remove(PROVIDER_CA_SOURCE_KEY);
+    match parse_policy(&sources, provider_ca.as_deref()) {
         Ok(p) => Some(p),
         Err(e) => {
-            warn!(error = %e, "the bootstrap policy's scriptSources is refused");
+            warn!(error = %e, "the bootstrap policy's parameters are refused");
             None
         }
     }
@@ -315,7 +314,7 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         own_provider: own_provider.as_ref(),
         class: class.as_ref(),
         cfg: &ctx.cfg.bootstrap,
-        pins: pins.as_deref(),
+        pins: pins.as_ref(),
         fleet: &fleet,
         now: &now,
     })?;

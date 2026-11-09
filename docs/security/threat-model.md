@@ -5,11 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-08**, against the architecture
-> defined by **ADR-0001 … ADR-0015** (all Accepted;
+> defined by **ADR-0001 … ADR-0016** (all Accepted;
 > ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended, ADR-0009
-> decision 1 superseded by ADR-0014, ADR-0003 amended after banlieue ADR-0124). Twelfth pass:
-> a cordon now reaches banlieue's scheduler as `banlieue.io/unschedulable`, which closes R-4.
-> The eleventh added the zone controller (ADR-0015), the tenth leader election (ADR-0014), the
+> decision 1 superseded by ADR-0014, ADR-0003 amended after banlieue ADR-0124, ADR-0011 amended
+> by ADR-0016). Thirteenth pass, for ADR-0016: the CA the hosts trust for the API server can be
+> pinned by digest in A-8. The twelfth closed R-4 (a cordon reaches banlieue's scheduler). The
+> eleventh added the zone controller (ADR-0015), the tenth leader election (ADR-0014), the
 > ninth pinned the install script's content (ADR-0013), the eighth closed R-3.
 > The shipped code is `crates/faubourg-api` (types, validation, the SSH
 > Secret contract, the Job-to-image contract), `crates/faubourg-controller` (the Host
@@ -71,7 +72,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-5 Host and AvailabilityZone CRs | Decide what gets bootstrapped and where VMs may land. |
 | A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003), and `faubourg.firestoned.io/host` decides which Provider's health is the host's (ADR-0009 decision 5). |
 | A-7 Pinned banlieue digest (the sha256 of the binary, or of banlieue's release tarball) | The script's only proof the binary is genuine. |
-| A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, and the only scripts that may run: each A-3 source and key with the sha256 of its content (ADR-0013). Root-equivalent across the fleet. The controller reads it; nothing in it is secret. |
+| A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, the only scripts that may run (each A-3 source and key with the sha256 of its content, ADR-0013), and optionally the CA every host trusts for the API server, pinned the same way (ADR-0016). Root-equivalent across the fleet. The controller reads it; nothing in it is secret. |
 | A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace, writes Host status and reads A-8. Cannot read a credential or a script (ADR-0008, ADR-0013), but can run the pinned image with any credential and a pinned script (R-5). |
 | A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
 | A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
@@ -227,6 +228,7 @@ flowchart LR
 | The bootstrap identity does anything else | E | Its only RBAC is `create` on `serviceaccounts/token` in banlieue's namespace (`deploy/rbac/controller.yaml`; `vap-test` checks it cannot read a Secret there or in the credentials namespace, nor mint elsewhere). |
 | A long-lived or differently scoped bootstrap token | E | The Job policy admits the `kube-api` volume only as a projected token of at most 600 seconds for the default audience plus `kube-root-ca.crt`; `automountServiceAccountToken` stays false (`vap-test`: a day's token, another audience, a Secret in the projection, another ConfigMap, a Secret named `kube-api`). |
 | The controller mints or sees a provider token | I, E | It holds no `serviceaccounts/token` anywhere (`vap-test`), and the token never passes through it: minted in the pod, sent on the install script's stdin, never in the Job, a Secret or a log (`e2e-test` checks the Job, its log and the controller's log). |
+| The CA a host trusts is substituted, so a server presenting it impersonates the API server and receives the host's provider token | S, I | The CA comes only from `providerCASource` in A-8, which the platform administrator writes; the admission policy admits a `provider-ca` volume only as that one ConfigMap key with its pinned digest, exactly once (`deploy/admission/bootstrap-policy.yaml`; `vap-test`: "a provider CA the policy does not pin", "another ConfigMap as the provider CA", "a Secret as the provider CA", "a second provider CA digest"), and the image hashes the bundle before any connection, exiting 67 on a mismatch or a bundle with no certificate (`config.rs`, `a_provider_ca_that_is_not_the_pinned_one_is_refused`). The digest is a bootstrap input, so a re-pin re-bootstraps every host through the rollout. Without a pin, hosts trust the cluster CA as before (`e2e-test` pins the cluster's own CA and the host still reaches the API server). |
 | The provider token reaches a server the attacker runs | I | A compromised controller can pair a password or first-use credential with an address of its choosing (R-5), and the token goes there. It is one provider's, for a day. A `knownHosts` key confines it to the pinned host. |
 | A pod cannot read its own credentials and fails in a way that hides a misconfiguration | D | `fsGroup` makes the root-owned Secret files readable by the bootstrap user (`job.rs`, `the_restricted_security_profile`); found by `e2e-test`, which runs the real image against real mounts. |
 
@@ -340,3 +342,4 @@ flowchart LR
 | 2026-11-08 | 0001 … 0014 | Tenth pass: ADR-0014 (leader election, Accepted), superseding ADR-0009 decision 1. A-13 (the Lease) and three TB-1 rows (a partitioned leader, a held or deleted Lease, a stolen identity) added; the "two instances race" row rewritten around the Lease; the one-replica assumption replaced by the clock-skew bound. The controller's RBAC gains one Lease in its own namespace; no new boundary or actor. |
 | 2026-11-08 | 0001 … 0015 | Eleventh pass: ADR-0015 (the zone controller, Accepted) and the ADR-0007 amendment. The last planned component shipped; three TB-1 rows (a forged or stale zone status, a zone controller writing more than status, a wrong Ready or membership); R-4 narrowed to VMs that do not opt in, with the opt-in documented. No new permission (the controller already patched zone status), boundary or actor. |
 | 2026-11-09 | 0001 … 0015 | Twelfth pass: ADR-0003 amended after banlieue ADR-0124. A cordon sets `banlieue.io/unschedulable`, which banlieue's scheduler enforces; **R-4 closed** for banlieue v0.5.3 and later. One TB-1 row (a zone cordoning its members through that key, refused). banlieue's side found and fixed a gap in its liveness filter that moved placed VMs; recorded in banlieue's threat model. No new boundary, actor or permission. |
+| 2026-11-09 | 0001 … 0016 | Thirteenth pass: ADR-0016 (the provider CA, Accepted) and the ADR-0011 amendment. A-8 gains `providerCASource`; one TB-6 row (a substituted CA, which would hand a host's token to an impersonator), controlled by the policy, the image's digest check (exit 67) and A-8's ownership. No new boundary, actor or permission. |

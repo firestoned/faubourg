@@ -18,7 +18,7 @@ use banlieue_api::banlieue::{Provider, ProviderClass};
 use faubourg_api::host::{
     BootstrapMethod, Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME,
 };
-use faubourg_api::policy::PinnedScript;
+use faubourg_api::policy::Policy;
 use faubourg_api::zone::AvailabilityZone;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -73,9 +73,9 @@ pub struct World<'a> {
     pub class: Option<&'a ProviderClass>,
     /// The controller's configuration.
     pub cfg: &'a BootstrapConfig,
-    /// The script sources the bootstrap policy pins; `None` when its parameters are missing or
-    /// malformed (ADR-0013 decision 2).
-    pub pins: Option<&'a [PinnedScript]>,
+    /// What the bootstrap policy pins (scripts, and the provider CA); `None` when its
+    /// parameters are missing or malformed (ADR-0013 decision 2, ADR-0016).
+    pub pins: Option<&'a Policy>,
     /// Every bootstrap Job in the credentials namespace, for the rollout (ADR-0013 decision 5).
     pub fleet: &'a [Job],
     /// The time to stamp on a condition that changes.
@@ -541,6 +541,7 @@ mod tests {
         BootstrapMethod, BootstrapSpec, DEFAULT_SCRIPT_KEY, HostKeyPolicy, HostSpec, ScriptRef,
         ScriptSourceKind, SecretName, SshSpec,
     };
+    use faubourg_api::policy::PinnedScript;
     use k8s_openapi::jiff::Timestamp;
     use serde_json::json;
 
@@ -627,7 +628,15 @@ mod tests {
 
     /// The Job the controller would have created for `h`, as the API server returns it.
     fn job_for(h: &Host, uid: &str, conditions: &[&str]) -> Job {
-        let mut j = bootstrap_job(h, &cfg(), Some(&pins())).unwrap();
+        let mut j = bootstrap_job(
+            h,
+            &cfg(),
+            Some(&Policy {
+                scripts: pins(),
+                provider_ca: None,
+            }),
+        )
+        .unwrap();
         j.metadata.uid = Some(uid.into());
         let mut v = serde_json::to_value(&j).unwrap();
         v["status"] = json!({
@@ -669,7 +678,7 @@ mod tests {
         own_provider: Option<Provider>,
         class: Option<ProviderClass>,
         cfg: BootstrapConfig,
-        pins: Option<Vec<PinnedScript>>,
+        pins: Option<Policy>,
         fleet: Vec<Job>,
         now: Time,
     }
@@ -685,7 +694,10 @@ mod tests {
                 own_provider: Some(own(true)),
                 class: Some(class("External")),
                 cfg: cfg(),
-                pins: Some(pins()),
+                pins: Some(Policy {
+                    scripts: pins(),
+                    provider_ca: None,
+                }),
                 fleet: vec![],
                 now: at(1_000),
             }
@@ -701,7 +713,7 @@ mod tests {
                 own_provider: self.own_provider.as_ref(),
                 class: self.class.as_ref(),
                 cfg: &self.cfg,
-                pins: self.pins.as_deref(),
+                pins: self.pins.as_ref(),
                 fleet: &self.fleet,
                 now: &self.now,
             })
@@ -1011,7 +1023,7 @@ mod tests {
             own_provider: f.own_provider.as_ref(),
             class: f.class.as_ref(),
             cfg: &f.cfg,
-            pins: f.pins.as_deref(),
+            pins: f.pins.as_ref(),
             fleet: &f.fleet,
             now: &f.now,
         });
@@ -1022,7 +1034,7 @@ mod tests {
 
     #[test]
     fn an_unpinned_script_fails_the_host_and_creates_nothing() {
-        for pins in [None, Some(vec![])] {
+        for pins in [None, Some(Policy::default())] {
             let mut f = Fixture::new(host(1));
             f.pins = pins.clone();
             let p = f.plan();
@@ -1159,7 +1171,7 @@ mod tests {
         let old = Fixture::new(host(1));
         let mut f = Fixture::new(host(1));
         f.jobs = vec![job_for(&old.host, "j1", &["Complete"])];
-        f.pins.as_mut().unwrap()[0].sha256 = SCRIPT_SHA256.replace("fedc", "0123");
+        f.pins.as_mut().unwrap().scripts[0].sha256 = SCRIPT_SHA256.replace("fedc", "0123");
         let p = f.plan();
         assert!(
             p.delete.is_empty(),

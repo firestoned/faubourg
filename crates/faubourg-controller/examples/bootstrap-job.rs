@@ -15,15 +15,16 @@ use faubourg_api::host::{
     BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, ScriptRef, ScriptSourceKind,
     SecretName, SshSpec,
 };
-use faubourg_api::policy::parse_script_sources;
+use faubourg_api::policy::parse_policy;
 use faubourg_controller::job::{BootstrapConfig, ProviderConfig, bootstrap_job};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = std::env::var("FAUBOURG_BOOTSTRAP_IMAGE")
         .map_err(|_| "set FAUBOURG_BOOTSTRAP_IMAGE to an image pinned by digest")?;
-    let pins = parse_script_sources(
+    let pins = parse_policy(
         &std::env::var("FAUBOURG_SCRIPT_SOURCES")
             .map_err(|_| "set FAUBOURG_SCRIPT_SOURCES to the policy's scriptSources")?,
+        std::env::var("FAUBOURG_PROVIDER_CA_SOURCE").ok().as_deref(),
     )?;
     let mut host = Host::new(
         "hv01",

@@ -40,6 +40,9 @@ pub const REASON_HOST_KEY_REFUSED: &str = "HostKeyRefused";
 /// Reason: the mounted script was not the one the bootstrap policy pins (ADR-0013 decision 4).
 /// Nothing was connected to.
 pub const REASON_SCRIPT_UNPINNED: &str = "ScriptUnpinned";
+/// Reason: the mounted provider CA was not the one the bootstrap policy pins, or held no
+/// certificate (ADR-0016). Nothing was connected to.
+pub const REASON_PROVIDER_CA_UNPINNED: &str = "ProviderCAUnpinned";
 /// Reason: the Host's `AvailabilityZone` does not exist.
 pub const REASON_ZONE_NOT_FOUND: &str = "ZoneNotFound";
 /// Reason: the Host's `AvailabilityZone` is refused by its own validation (ADR-0004).
@@ -75,6 +78,8 @@ pub enum JobFailure {
     HostKeyRefused,
     /// The mounted script was not the pinned one: its source was edited without a re-pin.
     ScriptUnpinned,
+    /// The mounted provider CA was not the pinned one, or held no certificate.
+    ProviderCaUnpinned,
     /// Anything else: an unreachable host, a refused login, a non-zero script exit.
     Other,
 }
@@ -153,6 +158,11 @@ pub fn decide(o: &Observed<'_>) -> Decision {
                 HostPhase::Failed,
                 REASON_SCRIPT_UNPINNED,
                 "the script source holds content the bootstrap policy does not pin; nothing ran",
+            ),
+            JobState::Failed(JobFailure::ProviderCaUnpinned) => decision(
+                HostPhase::Failed,
+                REASON_PROVIDER_CA_UNPINNED,
+                "the provider CA source holds content the bootstrap policy does not pin; nothing ran",
             ),
             JobState::Failed(JobFailure::Other) => decision(
                 HostPhase::Failed,
@@ -265,13 +275,14 @@ mod tests {
         Some(HostPhase::Degraded),
         Some(HostPhase::Failed),
     ];
-    const ALL_JOBS: [JobState; 7] = [
+    const ALL_JOBS: [JobState; 8] = [
         JobState::Absent,
         JobState::Running,
         JobState::Succeeded,
         JobState::Failed(JobFailure::ScriptDrift),
         JobState::Failed(JobFailure::HostKeyRefused),
         JobState::Failed(JobFailure::ScriptUnpinned),
+        JobState::Failed(JobFailure::ProviderCaUnpinned),
         JobState::Failed(JobFailure::Other),
     ];
     const ALL_HEALTH: [ProviderHealth; 5] = [
