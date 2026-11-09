@@ -32,7 +32,8 @@ pub const REASON_INVALID_LABEL: &str = "InvalidLabel";
     status = "AvailabilityZoneStatus",
     printcolumn = r#"{"name":"Storage","type":"string","jsonPath":".spec.storage.mode"}"#,
     printcolumn = r#"{"name":"Hosts","type":"integer","jsonPath":".status.hosts"}"#,
-    printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyHosts"}"#
+    printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyHosts"}"#,
+    printcolumn = r#"{"name":"Cordoned","type":"integer","jsonPath":".status.cordonedHosts"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct AvailabilityZoneSpec {
@@ -67,7 +68,7 @@ pub enum StorageMode {
     Shared,
 }
 
-/// Observed state of an availability zone (ADR-0007).
+/// Observed state of an availability zone (ADR-0007, ADR-0015), written by the zone controller.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailabilityZoneStatus {
@@ -77,6 +78,9 @@ pub struct AvailabilityZoneStatus {
     /// Of those, hosts in phase `Ready`.
     #[serde(default)]
     pub ready_hosts: u32,
+    /// Of the ready ones, those cordoned: healthy, but no place for new VMs (ADR-0015).
+    #[serde(default)]
+    pub cordoned_hosts: u32,
     /// `Ready` and the reasons behind it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,

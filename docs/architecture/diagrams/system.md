@@ -24,7 +24,7 @@ flowchart LR
     actor-vm-consumer["VM Consumer"]
     system-faubourg["faubourg"]
     service-host-controller["Host controller"]
-    service-zone-controller["Zone controller (planned, roadmap 02)"]
+    service-zone-controller["Zone controller"]
     service-bootstrap-job["Bootstrap Job"]
     service-bootstrap-admission-policy["Bootstrap admission policy"]
     data-asset-bootstrap-policy-params["Bootstrap policy parameters (A-8)"]

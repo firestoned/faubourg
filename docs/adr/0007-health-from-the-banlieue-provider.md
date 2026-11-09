@@ -32,3 +32,7 @@ banlieue's operator records `status.workload.heartbeat` as `Alive`, `Stale` or `
 *Amended 2026-11-07 by ADR-0009 (decision 12):* banlieue's operator writes the heartbeat into
 the Provider's status, so faubourg reads Providers only (`get`, `list`, `watch`) and needs
 nothing on Leases.
+
+*Amended 2026-11-08 by ADR-0015:* decision 2's zone `Ready` counts only hosts that are `Ready`
+and not cordoned (a zone whose every ready host is cordoned is `AllReadyHostsCordoned`), and
+the status gains `cordonedHosts`. The zone controller writes it.

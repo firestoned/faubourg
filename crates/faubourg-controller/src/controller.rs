@@ -32,6 +32,7 @@ use crate::config::Config;
 use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY, LABEL_REBOOTSTRAP};
 use crate::plan::{NotPersisted, World, plan};
 use crate::provider;
+use crate::zone;
 
 /// The field manager for everything the Host controller writes (ADR-0003, ADR-0009) but a
 /// bootstrapped Host's Provider spec, which has its own (ADR-0011, amended).
@@ -82,14 +83,14 @@ pub async fn run(client: Client, cfg: Config) {
     });
     // One reconcile at a time: the rollout counts re-bootstrap Jobs across Hosts, and two
     // concurrent reconciles could each see the last free slot (ADR-0013 decision 5).
-    let controller = Controller::new(ctx.hosts.clone(), watcher::Config::default())
+    let host_controller = Controller::new(ctx.hosts.clone(), watcher::Config::default())
         .with_config(kube::runtime::controller::Config::default().concurrency(1));
-    let hosts = controller.store();
+    let hosts = host_controller.store();
     let every_host = hosts.clone();
     let rollout_hosts = hosts.clone();
     let policy_name = format!("metadata.name={}", ctx.cfg.policy.name);
     let bootstrap_jobs = bootstrap_jobs();
-    controller
+    let host_loop = host_controller
         // Not `owns`: it maps a Job to its owner in the Job's namespace, and a Host is
         // cluster-scoped, so every Job event would miss.
         .watches(
@@ -144,7 +145,7 @@ pub async fn run(client: Client, cfg: Config) {
             |p: Provider| p.labels().get(LABEL_HOST).map(|h| ObjectRef::new(h)),
         )
         .shutdown_on_signal()
-        .run(reconcile, error_policy, ctx)
+        .run(reconcile, error_policy, ctx.clone())
         .for_each(|r| async move {
             match r {
                 // A deleted Host's Jobs and Provider still send events, for a Host that is gone.
@@ -154,8 +155,79 @@ pub async fn run(client: Client, cfg: Config) {
                 Err(e) => warn!(error = %e, "reconcile failed"),
                 Ok(_) => {}
             }
+        });
+
+    futures::join!(host_loop, run_zones(ctx));
+}
+
+/// The zone controller (ADR-0015), until SIGTERM or SIGINT.
+async fn run_zones(ctx: Arc<Ctx>) {
+    // Status only. Any Host event re-reconciles every zone: a Host moving from one zone to
+    // another changes both, and its event names only the new one.
+    let zone_controller = Controller::new(ctx.zones.clone(), watcher::Config::default());
+    let zones = zone_controller.store();
+    zone_controller
+        .watches(
+            ctx.hosts.clone(),
+            watcher::Config::default(),
+            move |_: Host| {
+                zones
+                    .state()
+                    .into_iter()
+                    .map(|z| ObjectRef::from_obj(&*z))
+                    .collect::<Vec<_>>()
+            },
+        )
+        .shutdown_on_signal()
+        .run(reconcile_zone, error_policy_zone, ctx)
+        .for_each(|r| async move {
+            match r {
+                Err(kube::runtime::controller::Error::ObjectNotFound(o)) => {
+                    debug!(zone = %o.name, "event for a zone that no longer exists");
+                }
+                Err(e) => warn!(error = %e, "zone reconcile failed"),
+                Ok(_) => {}
+            }
         })
         .await;
+}
+
+/// Writes a zone's status from its Hosts, when it changed (ADR-0015).
+async fn reconcile_zone(az: Arc<AvailabilityZone>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+    let hosts = ctx.hosts.list(&ListParams::default()).await?.items;
+    let status = zone::status(&az, &hosts, &Time(Timestamp::now()));
+    if az.status.as_ref() != Some(&status) {
+        let name = az.name_any();
+        let patch = serde_json::json!({
+            "apiVersion": format!("{}/{}", faubourg_api::GROUP, faubourg_api::VERSION),
+            "kind": "AvailabilityZone",
+            "status": status,
+        });
+        ctx.zones
+            .patch_status(
+                &name,
+                &PatchParams::apply(zone::FIELD_MANAGER).force(),
+                &Patch::Apply(&patch),
+            )
+            .await?;
+        let c = &status.conditions[0];
+        info!(
+            zone = %name,
+            hosts = status.hosts,
+            ready_hosts = status.ready_hosts,
+            cordoned_hosts = status.cordoned_hosts,
+            ready = %c.status,
+            reason = %c.reason,
+            "zone status"
+        );
+    }
+    Ok(Action::requeue(RESYNC))
+}
+
+#[allow(clippy::needless_pass_by_value)] // the signature Controller::run requires
+fn error_policy_zone(az: Arc<AvailabilityZone>, e: &Error, _ctx: Arc<Ctx>) -> Action {
+    warn!(zone = %az.name_any(), error = %e, "zone reconcile failed; retrying");
+    Action::requeue(RETRY)
 }
 
 /// True for a re-bootstrap Job, whose every change can hold or release another Host.
