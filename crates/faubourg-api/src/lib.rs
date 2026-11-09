@@ -7,7 +7,6 @@
 //! The API group lives in the constants below and in the two `#[kube(group = ...)]`
 //! attributes; a test keeps them in step.
 
-pub mod banlieue;
 pub mod bootstrap;
 pub mod crd;
 pub mod credentials;

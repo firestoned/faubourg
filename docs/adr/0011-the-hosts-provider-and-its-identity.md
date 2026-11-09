@@ -150,3 +150,10 @@ the only write faubourg makes to an adopted Provider's spec, and it changes no v
 *Amended 2026-11-09 by ADR-0016:* the CA option this ADR left open exists. A bundle pinned as
 `providerCASource` in the bootstrap policy's parameters replaces the cluster CA in the host's
 kubeconfig; the pod's own calls still use the cluster CA.
+
+*Amended 2026-11-09, after banlieue ADR-0126:* faubourg no longer re-derives the provider's
+ServiceAccount name. banlieue's operator publishes it in the Provider's
+`status.workload.serviceAccountName` (banlieue v0.5.5 and later), and the identity gate of
+decision 2 waits for it: until it is there, and a valid object name, the Host stays `Pending`,
+`AwaitingProviderIdentity`. The Job is created with that name. The token policy still bounds
+the name by `providerServiceAccountPrefix`, so a wrong value is refused, not trusted.

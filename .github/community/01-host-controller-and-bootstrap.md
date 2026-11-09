@@ -25,6 +25,6 @@ Implements ADR-0005, ADR-0006, ADR-0007 for one host. ADD cycle per item.
 - [x] Leader election: two replicas, one leader through the Lease `faubourg-controller`, taken by conditional writes, the leader stopping before its lease can lapse (ADR-0014); `controller-test` runs two controllers and checks the handover
 - [x] Ready from the Provider's `Ready` and heartbeat (banlieue ADR-0102), read from the one Provider labelled with the host (ADR-0009 decision 5)
 - [x] ADR-0011: the host's first provider token is minted by the bootstrap pod (TokenRequest, bounded by `faubourg-provider-tokens`) and delivered on the install script's stdin; end to end on kind with the real image (`make e2e-test`)
-- [ ] Ask banlieue to publish the provider ServiceAccount name (status or `banlieue-api`), and drop faubourg's copy of its naming
+- [x] banlieue publishes the provider ServiceAccount name (banlieue ADR-0126, v0.5.5: `status.workload.serviceAccountName`); faubourg reads it, waits while it is absent, and its copy of banlieue's naming is gone (R-10 closed)
 - [x] A CA option for hosts that reach the API server through another certificate authority: `providerCASource`, pinned by digest in the bootstrap policy, checked by the policy and the image (exit 67), written into the host's kubeconfig (ADR-0016)
 - [x] Threat-model pass after stage 2 closes R-3 (eighth pass; R-13 added)

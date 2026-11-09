@@ -197,7 +197,8 @@ eventually "no Job before the Provider has an identity" 30 phase_is hv01 Pending
 # banlieue's operator, simulated: it reports the Provider's identity.
 identity() {
   kubectl -n "$BANLIEUE" patch provider "$1" --subresource=status --type=merge \
-    -p "{\"status\": {\"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\"}}}" >/dev/null
+    -p "{\"status\": {\"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\",
+      \"serviceAccountName\": \"banlieue-provider-cloud-hypervisor-$1\"}}}" >/dev/null
 }
 identity hv01
 eventually "the Job is created and admitted" 90 job_exists bootstrap-hv01-g1

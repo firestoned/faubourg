@@ -247,7 +247,8 @@ if kubectl -n "$CREDS" get jobs -o name | grep -q .; then fail "the identity gat
 echo "--- banlieue (simulated) gives the Provider its identity"
 kubectl -n "$BANLIEUE" create serviceaccount "$SA" >/dev/null
 kubectl -n "$BANLIEUE" patch provider hv01 --subresource=status --type=merge \
-  -p "{\"status\": {\"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\"}}}" >/dev/null
+  -p "{\"status\": {\"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\",
+    \"serviceAccountName\": \"$SA\"}}}" >/dev/null
 
 echo "--- the bootstrap Job, with the real image"
 eventually "the Job is created and admitted" 60 kubectl -n "$CREDS" get job bootstrap-hv01-g1
@@ -288,7 +289,8 @@ GEN="$(kubectl -n "$BANLIEUE" get provider hv01 -o jsonpath='{.metadata.generati
 kubectl -n "$BANLIEUE" patch provider hv01 --subresource=status --type=merge -p "{\"status\": {
   \"conditions\": [{\"type\": \"Ready\", \"status\": \"True\", \"reason\": \"Test\", \"message\": \"\",
     \"observedGeneration\": $GEN, \"lastTransitionTime\": \"2026-11-07T00:00:00Z\"}],
-  \"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\", \"heartbeat\": \"Alive\"}}}" >/dev/null
+  \"workload\": {\"mode\": \"External\", \"namespace\": \"$BANLIEUE\", \"serviceAccountName\": \"$SA\",
+    \"heartbeat\": \"Alive\"}}}" >/dev/null
 eventually "the Host is Ready" 30 phase_is Ready ProviderHealthy
 
 echo "--- cordon"
