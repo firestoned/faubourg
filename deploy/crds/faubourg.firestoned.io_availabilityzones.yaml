@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.readyHosts
       name: Ready
       type: integer
+    - jsonPath: .status.cordonedHosts
+      name: Cordoned
+      type: integer
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -60,7 +63,9 @@ spec:
                 type: object
             type: object
           status:
-            description: Observed state of an availability zone (ADR-0007).
+            description: >-
+              Observed state of an availability zone (ADR-0007, ADR-0015), written by the
+              zone controller.
             nullable: true
             properties:
               conditions:
@@ -111,6 +116,12 @@ spec:
                   - type
                   type: object
                 type: array
+              cordonedHosts:
+                default: 0
+                description: "Of the ready ones, those cordoned: healthy, but no place for new VMs (ADR-0015)."
+                format: uint32
+                minimum: 0.0
+                type: integer
               hosts:
                 default: 0
                 description: Hosts whose `zoneRef` names this zone.

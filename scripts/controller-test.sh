@@ -325,11 +325,12 @@ never "and gets no Job" 5 job_exists bootstrap-hv02-g1
 echo "--- an adopted Host follows its labelled Provider"
 host hv03 az1 hv03.home.example None
 eventually "an adopted Host waits for its Provider" 30 phase_is hv03 Pending AwaitingProvider
-provider() { # name
+provider() { # name[, host it is labelled with (default hv03)]
+  local h=${2:-hv03}
   kubectl apply -f - >/dev/null <<EOF
 {"apiVersion": "banlieue.io/v1alpha1", "kind": "Provider",
- "metadata": {"name": "$1", "namespace": "$BANLIEUE", "labels": {"faubourg.firestoned.io/host": "hv03"}},
- "spec": {"providerClassRef": {"name": "cloud-hypervisor"}, "connection": {"endpoint": "hv03.home.example"}}}
+ "metadata": {"name": "$1", "namespace": "$BANLIEUE", "labels": {"faubourg.firestoned.io/host": "$h"}},
+ "spec": {"providerClassRef": {"name": "cloud-hypervisor"}, "connection": {"endpoint": "$h.home.example"}}}
 EOF
   local gen
   gen="$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.generation}')"
@@ -350,6 +351,41 @@ eventually "status names the Provider" 5 bash -c \
   "[ \"\$(kubectl get host hv03 -o jsonpath='{.status.providerRef}')\" = hv03 ]"
 provider hv03-copy
 eventually "two labelled Providers: Degraded, none picked" 30 phase_is hv03 Degraded ProviderAmbiguous
+
+echo "--- a zone reports its hosts (ADR-0015)"
+zone() { # name, storage mode
+  kubectl apply -f - >/dev/null <<EOF
+{"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "AvailabilityZone",
+ "metadata": {"name": "$1"}, "spec": {"storage": {"mode": "$2"}}}
+EOF
+}
+zone_is() { # zone, Ready status, reason, hosts, readyHosts, cordonedHosts
+  kubectl get availabilityzone "$1" -o json | jq -e --arg s "$2" --arg r "$3" \
+    --argjson h "$4" --argjson rh "$5" --argjson c "$6" '
+    .status.hosts == $h and .status.readyHosts == $rh and .status.cordonedHosts == $c
+    and (.status.conditions | any(.type == "Ready" and .status == $s and .reason == $r))'
+}
+zone zh-a Local
+zone zh-shared Shared
+zone zh-b Local
+eventually "a zone with no hosts is not Ready" 30 zone_is zh-a False NoHosts 0 0 0
+eventually "a Shared zone is refused (ADR-0004)" 30 zone_is zh-shared False StorageModeUnsupported 0 0 0
+host hv13 zh-a hv13.home.example None
+provider hv13 hv13
+eventually "a zone whose host is Ready is Ready" 60 zone_is zh-a True HostsReady 1 1 0
+kubectl patch host hv13 --type=merge -p '{"spec": {"cordoned": true}}' >/dev/null
+eventually "a zone whose only Ready host is cordoned is not" 30 zone_is zh-a False AllReadyHostsCordoned 1 1 1
+kubectl patch host hv13 --type=merge -p '{"spec": {"zoneRef": "zh-b", "cordoned": false}}' >/dev/null
+eventually "a host moving out empties its old zone" 30 zone_is zh-a False NoHosts 0 0 0
+eventually "and counts in its new one" 30 zone_is zh-b True HostsReady 1 1 0
+if kubectl get availabilityzone zh-a -o json --show-managed-fields | jq -e '
+   .metadata.managedFields | map(select(.manager == "faubourg.firestoned.io/zone-controller"))
+   | all(.subresource == "status")' >/dev/null; then
+  pass "the zone controller writes status only"
+else fail "the zone controller" "writes more than status"; fi
+kubectl delete host hv13 >/dev/null
+kubectl -n "$BANLIEUE" delete provider hv13 >/dev/null
+kubectl delete availabilityzone zh-a zh-shared zh-b >/dev/null
 
 echo "--- the CRD refuses a long Host name"
 LONG="h$(printf 'a%.0s' $(seq 1 63))"

@@ -30,7 +30,8 @@ tables below.
 | --- | --- |
 | `hosts` | Hosts whose `zoneRef` names this zone. |
 | `readyHosts` | Of those, hosts in phase `Ready`. |
-| `conditions` | `Ready`, and why. |
+| `cordonedHosts` | Of the ready ones, those cordoned. |
+| `conditions` | `Ready`, and why: `StorageModeUnsupported`, `InvalidSpec`, `NoHosts`, `NoReadyHost`, `AllReadyHostsCordoned` or `HostsReady` ([ADR-0015](../adr/0015-zone-controller.md)). |
 | `observedGeneration` | The generation the conditions describe. |
 
 ## Host

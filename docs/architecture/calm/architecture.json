@@ -28,8 +28,8 @@
     {
       "unique-id": "service-zone-controller",
       "node-type": "service",
-      "name": "Zone controller (planned, roadmap 02)",
-      "description": "Reconciles AvailabilityZone: rejects storage.mode Shared in v1 (ADR-0004), counts member hosts, publishes Ready."
+      "name": "Zone controller",
+      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015)."
     },
     {
       "unique-id": "service-bootstrap-job",
@@ -295,7 +295,7 @@
     },
     {
       "unique-id": "rel-zone-controller-kube",
-      "description": "Watches AvailabilityZone and Host; writes AvailabilityZone status.",
+      "description": "Reads AvailabilityZones and Hosts; patches availabilityzones/status only (ADR-0015).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -517,6 +517,7 @@
     "docs/adr/0011-the-hosts-provider-and-its-identity.md",
     "docs/adr/0012-images-signed-and-published-by-digest.md",
     "docs/adr/0013-script-content-pinned-and-rolled-out.md",
-    "docs/adr/0014-controller-leader-election.md"
+    "docs/adr/0014-controller-leader-election.md",
+    "docs/adr/0015-zone-controller.md"
   ]
 }

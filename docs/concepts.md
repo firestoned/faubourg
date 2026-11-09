@@ -84,8 +84,33 @@ is no Job and no SSH, and it goes straight from Pending to whatever its `Provide
 
 ## Zone health
 
-An `AvailabilityZone` publishes `hosts`, `readyHosts`, and `Ready=True` when at least one member
-host is `Ready` and its storage mode is supported.
+The zone controller writes each `AvailabilityZone`'s status from its hosts, and nothing else
+([ADR-0015](adr/0015-zone-controller.md)):
+
+| Field | Meaning |
+| --- | --- |
+| `hosts` | Hosts whose `zoneRef` names the zone |
+| `readyHosts` | of those, Hosts in phase `Ready` |
+| `cordonedHosts` | of the ready ones, those cordoned |
+
+`Ready` is the first row that applies:
+
+| Reason | `Ready` | When |
+| --- | --- | --- |
+| `StorageModeUnsupported` | False | `storage.mode: Shared` |
+| `InvalidSpec` | False | any other refused field |
+| `NoHosts` | False | no Host names the zone |
+| `NoReadyHost` | False | no member Host is `Ready` |
+| `AllReadyHostsCordoned` | False | every `Ready` member is cordoned |
+| `HostsReady` | True | at least one member is `Ready` and not cordoned |
+
+It is a report, not a gate: a zone with no ready host still bootstraps its first one.
+
+```sh
+kubectl get availabilityzones
+# NAME   STORAGE   HOSTS   READY   CORDONED
+# az1    Local     3       3       1
+```
 
 ## Storage: local only in v1
 
@@ -102,9 +127,34 @@ today: the zone is `Ready=False` with reason `StorageModeUnsupported`.
 ## Cordon
 
 `spec.cordoned: true` on a Host labels its `Provider` `faubourg.firestoned.io/cordoned: "true"`.
-banlieue does not yet exclude cordoned providers from placement, so for now a cordon is
-advisory and the Host's condition says so (accepted risk R-4 in the
+banlieue does not yet exclude cordoned providers from placement on its own, so a cordon is
+advisory unless the VM asks for it (accepted risk R-4 in the
 [threat model](security/threat-model.md)).
+
+## Placing VMs in a zone
+
+A VM lands in a zone through its `providerSelector`, which banlieue's scheduler matches against
+each host's `Provider` labels. To keep it off cordoned hosts as well, add a `DoesNotExist`
+expression, which the scheduler honours today:
+
+```yaml
+apiVersion: banlieue.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: web-01
+spec:
+  providerSelector:
+    matchLabels:
+      faubourg.firestoned.io/zone: az1
+    matchExpressions:
+      - key: faubourg.firestoned.io/cordoned
+        operator: DoesNotExist
+  # ...
+```
+
+A zone's `providerLabels` are on every member's `Provider` too, so a VM can select on them
+(a rack, a power domain) the same way. Spreading VMs across hosts inside a zone is banlieue's:
+each host's `Provider` is one failure domain.
 
 ## The vCenter analogy
 

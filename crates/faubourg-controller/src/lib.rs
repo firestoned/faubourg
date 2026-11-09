@@ -25,3 +25,4 @@ pub mod leader;
 pub mod phase;
 pub mod plan;
 pub mod provider;
+pub mod zone;

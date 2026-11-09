@@ -5,11 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 # Threat Model
 
 > **Status:** Living document. Last full pass **2026-11-08**, against the architecture
-> defined by **ADR-0001 … ADR-0014** (all Accepted;
+> defined by **ADR-0001 … ADR-0015** (all Accepted;
 > ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended, ADR-0009
-> decision 1 superseded by ADR-0014). Tenth pass, for ADR-0014: the controller runs two
-> replicas and only the holder of a Lease acts. The ninth pinned the install script's content
-> (ADR-0013); the eighth closed R-3.
+> decision 1 superseded by ADR-0014). Eleventh pass, for ADR-0015: the zone controller writes
+> each zone's status from its hosts. The tenth added leader election (ADR-0014), the ninth
+> pinned the install script's content (ADR-0013), the eighth closed R-3.
 > The shipped code is `crates/faubourg-api` (types, validation, the SSH
 > Secret contract, the Job-to-image contract), `crates/faubourg-controller` (the Host
 > reconciler and its binary) and `crates/faubourg-bootstrap` (the bootstrap image's binary, on
@@ -24,7 +24,7 @@ SPDX-License-Identifier: Apache-2.0
 > key, and the host's provider came up on the token the bootstrap pod minted. The live tests
 > found three bugs, each fixed with a test that reproduces it (ADR-0010 and ADR-0011 amended,
 > the example script's `--provider-binary`) and one new accepted risk (R-13). Every control
-> below exists and is cited; the zone controller (roadmap 02) is the one planned component.
+> below exists and is cited; no component is planned.
 
 ## 1. What faubourg is, in security terms
 
@@ -57,7 +57,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Image publication and the install file (ADR-0012) | shipped in CI; v0.1.0 and v0.1.1 released and verified | `.github/workflows/build.yaml` (`images`, `release-manifests`), `images/`, `scripts/render-manifests.sh` |
 | Leader election (ADR-0014) | shipped, tested on kind with two controllers | `crates/faubourg-controller/src/{leader,main}.rs`, `deploy/rbac/controller.yaml`, `deploy/controller/deployment.yaml` |
 | Script pinning and the rollout (ADR-0013) | shipped, tested on kind and against OpenSSH | `crates/faubourg-api/src/policy.rs`, `crates/faubourg-controller/src/{plan,job}.rs`, `crates/faubourg-bootstrap/src/config.rs`, `deploy/admission/bootstrap-policy.yaml` |
-| Zone controller | planned, roadmap 02 | |
+| Zone controller (ADR-0015) | shipped, tested on kind | `crates/faubourg-controller/src/{zone,controller}.rs` |
 
 ## 3. Assets
 
@@ -162,6 +162,9 @@ flowchart LR
 | A partitioned or paused leader keeps acting after a standby took over | T | It exits when no renewal has succeeded within the deadline, and each renewal is cut off at the deadline, so a hung API call cannot hold it past it (`leader.rs`, `hold`). A leader that loses the Lease to another holder stops at once (`main.rs`). |
 | The controller's Lease is held or deleted to stop every replica | D | Writing it takes `update` on that Lease or `create` in `faubourg-system`, which only the controller and a cluster administrator hold; the controller cannot delete it (`deploy/rbac/controller.yaml`; `vap-test`: "delete the leader Lease: no", "write another Lease: no", "create a Lease elsewhere: no"). A replica that cannot lead waits; nothing on the hosts depends on it. |
 | A replica starts with no identity, or with another's, and takes the Lease as its own | S, T | It refuses to start without `POD_NAME` from the downward API, and never guesses one (`config.rs`, `the_controller_needs_a_well_formed_identity_to_elect`; `controller-test`). Pod names are unique in a namespace. |
+| A zone's status is forged or stale, and an operator places VMs on a zone that cannot take them | S, T | Of faubourg's identities only the controller writes `availabilityzones/status`, under its own field manager (`deploy/rbac/controller.yaml`, `zone.rs`, `FIELD_MANAGER`); anyone else who can is a cluster administrator. The status is a report: nothing faubourg decides reads it (ADR-0015 decision 6), and banlieue places by Provider labels, not by it. A stale count lasts at most until the next Host event or resync. |
+| The zone controller writes more than a zone's status | T | It applies status only, and `controller-test` checks every entry of its field manager is on the `status` subresource ("the zone controller writes status only"). |
+| A zone reports Ready while every usable host is cordoned, or counts a host from another zone | T | `Ready` needs a member that is `Ready` and not cordoned; membership is the Host's `zoneRef` alone (`zone.rs`, `a_zone_whose_ready_hosts_are_all_cordoned_is_not_ready`, `a_zone_with_no_hosts_is_not_ready`; `controller-test`: "a host moving out empties its old zone"). |
 | A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
 | The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch`, `create`, `patch` on `providers.banlieue.io` only: no delete, no Secret, no `serviceaccounts/token` (`deploy/rbac/controller.yaml`; `vap-test` checks each). |
 | faubourg overwrites an adopted host's Provider, or deletes one | T, D | An adopted host's Provider gets labels only, by server-side apply, never its spec (`provider.rs`, `every_host_gets_labels_and_nothing_else_under_the_labels_manager`, `spec_body`; `controller-test` checks faubourg owns no spec field). The one exception moves a spec a v0.1 controller left under the labels' manager to the spec manager, with its values unchanged (`provider.rs`, `migrated_spec_body`, `nothing_moves_unless_the_labels_manager_owns_the_spec`). faubourg holds no delete on Providers and sets no ownerReference, so deleting a Host keeps its Provider (`controller-test`, `e2e-test`). |
@@ -287,7 +290,7 @@ flowchart LR
 | R-1 | New root code on the fleet takes two roles: the script maintainer writes the source (A-3) and the platform administrator pins its digest (A-8). Together, or one person holding both, they are root on every host, one host at a time, stopping at the first failure (ADR-0013). Mitigated by RBAC on both ConfigMaps. | A second reviewer of a pin (a signed script, or a pin that needs two approvals). |
 | R-2 | A static SSH key in a Kubernetes Secret. | An SSH CA is available (ADR-0006 open question). |
 | R-3 | Closed 2026-11-08 by the eighth pass: every control above exists, v0.1.0 and v0.1.1 are released and verified, and a live host was adopted and then bootstrapped from nothing. | (closed) |
-| R-4 | Cordon is advisory: banlieue does not yet exclude cordoned Providers (ADR-0003 decision 5). | banlieue grows a selector convention or a cordon field. |
+| R-4 | Cordon is advisory: banlieue's scheduler does not exclude cordoned Providers by default (ADR-0003 decision 5). A VM opts in with `faubourg.firestoned.io/cordoned DoesNotExist` in its `providerSelector`, which the scheduler honours (`docs/concepts.md`); one that leaves it out can still land on a cordoned host. The zone status shows cordoned hosts (`cordonedHosts`, ADR-0015). | banlieue skips cordoned Providers by default, or grows a cordon field (roadmap 02). |
 | R-5 | A compromised controller can run the pinned image with any credential Secret against any address. A key with `knownHosts` only works against the hosts it pins. A password, or a key without `knownHosts` (TOFU), can be pointed at a server the attacker runs: the password is disclosed; a key's signature is bound to that session (ADR-0008 consequences). | SSH certificates replace static keys and passwords (R-2). |
 | R-7 | Whoever can label Providers in banlieue's namespace can attach a second one to a host, which makes it `ProviderAmbiguous` (fails closed), or label an adopted host's Provider before faubourg does. They can already create a Provider banlieue places on, so this grants nothing new. Narrowed by ADR-0011: faubourg now owns the label on the Provider it creates. | banlieue publishes which Provider a host is, rather than a label. |
 | R-8 | `TrustOnFirstUse` accepts whatever key answers the first connection. Mitigated: explicit opt-in, pinned after the first success, `knownHosts` overrides it. | SSH host certificates are supported (ADR-0006 open question). |
@@ -333,3 +336,4 @@ flowchart LR
 | 2026-11-08 | 0001 … 0012 | Eighth pass, the full one roadmap 01 called for: **R-3 closed**. Every section walked against v0.1.1 and the live tests (adoption, then a bootstrap from nothing, on k0s and a real Cloud Hypervisor host). Header, components, A-2 and A-7 rewritten for what shipped; two TB-3 rows (another SSH front end on the address; a re-run reverting a host's local settings) and one TB-4 row (the archive's owner) added; R-11 and two assumptions confirmed live; R-13 added. No new boundary, actor or permission; the diagram is unchanged. |
 | 2026-11-08 | 0001 … 0013 | Ninth pass: ADR-0013 (the script's content pinned by digest, a change rolled out one host at a time, Accepted). The controller reads A-8 by name and nothing else; the policy admits only a pinned source, key and digest, exactly once; the image refuses any other content before connecting (exit 66). A-3, A-8, A-9 and two actors rewritten; TB-1 rows for in-place edits, a duplicated digest, the rollout, a forged halt and a forged status, and one TB-2 row; R-1 narrowed to two roles; the open "script content re-runs nothing" assumption removed. No new boundary; CALM gains A-8 as a data asset with its two relationships. |
 | 2026-11-08 | 0001 … 0014 | Tenth pass: ADR-0014 (leader election, Accepted), superseding ADR-0009 decision 1. A-13 (the Lease) and three TB-1 rows (a partitioned leader, a held or deleted Lease, a stolen identity) added; the "two instances race" row rewritten around the Lease; the one-replica assumption replaced by the clock-skew bound. The controller's RBAC gains one Lease in its own namespace; no new boundary or actor. |
+| 2026-11-08 | 0001 … 0015 | Eleventh pass: ADR-0015 (the zone controller, Accepted) and the ADR-0007 amendment. The last planned component shipped; three TB-1 rows (a forged or stale zone status, a zone controller writing more than status, a wrong Ready or membership); R-4 narrowed to VMs that do not opt in, with the opt-in documented. No new permission (the controller already patched zone status), boundary or actor. |
