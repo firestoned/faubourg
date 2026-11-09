@@ -283,8 +283,10 @@ eventually "the Host is Ready" 30 phase_is Ready ProviderHealthy
 echo "--- cordon"
 kubectl patch host hv01 --type=merge -p '{"spec": {"cordoned": true}}' >/dev/null
 eventually "the Provider is labelled cordoned" 30 label_is faubourg.firestoned.io/cordoned true
+eventually "and unschedulable, for banlieue's scheduler (banlieue ADR-0124)" 30 label_is banlieue.io/unschedulable true
 kubectl patch host hv01 --type=merge -p '{"spec": {"cordoned": false}}' >/dev/null
 eventually "and the label goes with the cordon" 30 label_is faubourg.firestoned.io/cordoned ""
+eventually "and so does banlieue's" 30 label_is banlieue.io/unschedulable ""
 if kubectl -n "$CREDS" get job bootstrap-hv01-g2 >/dev/null 2>&1 || kubectl -n "$CREDS" get job bootstrap-hv01-g3 >/dev/null 2>&1; then
   fail "cordon" "started a new Job"
 else pass "cordoning ran nothing on the host"; fi

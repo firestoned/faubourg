@@ -29,6 +29,10 @@ pub const LABEL_ZONE: &str = "faubourg.firestoned.io/zone";
 pub const LABEL_HOST: &str = "faubourg.firestoned.io/host";
 /// Label faubourg owns on each host's banlieue `Provider` while the host is cordoned.
 pub const LABEL_CORDONED: &str = "faubourg.firestoned.io/cordoned";
+/// banlieue's own cordon (banlieue ADR-0124): on a Provider, `"true"` keeps every new VM off it.
+/// faubourg sets it with [`LABEL_CORDONED`]. A copy of `banlieue_api::banlieue::LABEL_UNSCHEDULABLE`,
+/// which faubourg-api does not depend on; the controller's tests fail if the two differ.
+pub const LABEL_BANLIEUE_UNSCHEDULABLE: &str = "banlieue.io/unschedulable";
 /// Prefix of every label key faubourg owns; a zone's `providerLabels` may not use it.
 pub const LABEL_PREFIX: &str = "faubourg.firestoned.io/";
 

@@ -46,7 +46,7 @@ spec:
                   type: string
                 description: |-
                   Labels copied onto every member host's banlieue `Provider`, and so onto its failure
-                  domain. Keys under `faubourg.firestoned.io/` are reserved.
+                  domain. Keys under `faubourg.firestoned.io/`, and `banlieue.io/unschedulable`, are reserved.
                 type: object
               storage:
                 default:

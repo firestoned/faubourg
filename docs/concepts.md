@@ -126,16 +126,17 @@ today: the zone is `Ready=False` with reason `StorageModeUnsupported`.
 
 ## Cordon
 
-`spec.cordoned: true` on a Host labels its `Provider` `faubourg.firestoned.io/cordoned: "true"`.
-banlieue does not yet exclude cordoned providers from placement on its own, so a cordon is
-advisory unless the VM asks for it (accepted risk R-4 in the
-[threat model](security/threat-model.md)).
+`spec.cordoned: true` on a Host labels its `Provider` `faubourg.firestoned.io/cordoned: "true"`
+and `banlieue.io/unschedulable: "true"`. banlieue's scheduler keeps every new VM off a Provider
+with the second label (banlieue ADR-0124, banlieue v0.5.3 and later), and leaves the VMs already
+there where they are. Uncordoning removes both labels.
 
 ## Placing VMs in a zone
 
 A VM lands in a zone through its `providerSelector`, which banlieue's scheduler matches against
-each host's `Provider` labels. To keep it off cordoned hosts as well, add a `DoesNotExist`
-expression, which the scheduler honours today:
+each host's `Provider` labels. Cordoned hosts are skipped without anything in the selector. With
+a banlieue older than v0.5.3, which does not know the cordon label, add a `DoesNotExist`
+expression to keep a VM off them:
 
 ```yaml
 apiVersion: banlieue.io/v1alpha1

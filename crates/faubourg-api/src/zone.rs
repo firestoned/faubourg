@@ -44,7 +44,7 @@ pub struct AvailabilityZoneSpec {
     #[serde(default)]
     pub storage: ZoneStorage,
     /// Labels copied onto every member host's banlieue `Provider`, and so onto its failure
-    /// domain. Keys under `faubourg.firestoned.io/` are reserved.
+    /// domain. Keys under `faubourg.firestoned.io/`, and `banlieue.io/unschedulable`, are reserved.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_labels: BTreeMap<String, String>,
 }
@@ -102,11 +102,16 @@ impl AvailabilityZoneSpec {
         }
         for (k, v) in &self.provider_labels {
             let field = format!("spec.providerLabels[{k}]");
-            if k.starts_with(LABEL_PREFIX) {
+            // A zone cannot cordon its hosts behind faubourg's back: banlieue's cordon
+            // label is faubourg's, set from a Host's `cordoned` (ADR-0003, amended).
+            if k.starts_with(LABEL_PREFIX) || k == crate::LABEL_BANLIEUE_UNSCHEDULABLE {
                 errs.push(
                     &field,
                     REASON_RESERVED_LABEL,
-                    format!("keys under {LABEL_PREFIX} are owned by faubourg"),
+                    format!(
+                        "keys under {LABEL_PREFIX} and {} are owned by faubourg",
+                        crate::LABEL_BANLIEUE_UNSCHEDULABLE
+                    ),
                 );
             } else if !is_label_key(k) || !is_label_value(v) {
                 errs.push(&field, REASON_INVALID_LABEL, "not a valid Kubernetes label");
@@ -167,6 +172,19 @@ mod tests {
     fn shared_storage_is_refused_in_v1() {
         let err = spec(StorageMode::Shared).validate().unwrap_err();
         assert_eq!(err.reasons(), vec![REASON_STORAGE_MODE_UNSUPPORTED]);
+    }
+
+    #[test]
+    fn provider_labels_may_not_cordon_a_zone_through_banlieue() {
+        let mut s = spec(StorageMode::Local);
+        s.provider_labels.insert(
+            crate::LABEL_BANLIEUE_UNSCHEDULABLE.to_string(),
+            "true".to_string(),
+        );
+        assert_eq!(
+            s.validate().unwrap_err().reasons(),
+            vec![REASON_RESERVED_LABEL]
+        );
     }
 
     #[test]

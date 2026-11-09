@@ -229,7 +229,8 @@ spec_kept() { # provider, endpoint
     .spec.providerClassRef.name == "cloud-hypervisor" and .spec.connection.endpoint == $e'
 }
 cordon_label() { # provider
-  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.faubourg\.firestoned\.io/cordoned}')" = true ]
+  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.faubourg\.firestoned\.io/cordoned}')" = true ] &&
+    [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.banlieue\.io/unschedulable}')" = true ]
 }
 host hv06 az1 hv06.home.example Script
 managers() { # provider: who owns what in its spec, for a failure's context
