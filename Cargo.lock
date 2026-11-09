@@ -223,9 +223,9 @@ dependencies = [
 
 [[package]]
 name = "banlieue-api"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39fc72b937d2c19242bcc6fe36edc91abbe0776faa4f4aa4cd96ec85183fbb9"
+checksum = "d8d74602e719ccbeae7341d469379c24201ea3233dbeadfcd6f6b8ad5cad2ae6"
 dependencies = [
  "k8s-openapi",
  "kube",
