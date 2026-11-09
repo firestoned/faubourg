@@ -35,7 +35,7 @@
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job",
-      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It refuses a mounted script whose sha256 is not the pinned FAUBOURG_SCRIPT_SHA256 before opening any connection (exit 66, ScriptUnpinned, ADR-0013), verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It refuses a mounted script whose sha256 is not the pinned FAUBOURG_SCRIPT_SHA256 before opening any connection (exit 66, ScriptUnpinned, ADR-0013), and a mounted provider CA whose sha256 is not the pinned FAUBOURG_PROVIDER_CA_SHA256 (exit 67, ProviderCAUnpinned), which it then writes into the host's kubeconfig instead of the cluster CA (ADR-0016), verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
@@ -47,7 +47,7 @@
       "unique-id": "data-asset-bootstrap-policy-params",
       "node-type": "data-asset",
       "name": "Bootstrap policy parameters (A-8)",
-      "description": "The ConfigMap faubourg-bootstrap-policy in faubourg-system, written by the platform administrator: the bootstrap image's digest, and each allowed script source with its key and the sha256 of its content (ConfigMap/<name>/<key>@sha256:<hex>). The admission policy evaluates every Job against it; the Host controller reads it, and nothing else of its kind, to learn each script's pinned digest. A script maintainer cannot pin their own change (ADR-0008, ADR-0013)."
+      "description": "The ConfigMap faubourg-bootstrap-policy in faubourg-system, written by the platform administrator: the bootstrap image's digest, and each allowed script source with its key and the sha256 of its content (ConfigMap/<name>/<key>@sha256:<hex>). The admission policy evaluates every Job against it; the Host controller reads it, and nothing else of its kind, to learn each script's pinned digest. Optionally pins the CA the hosts trust for the API server, providerCASource, the same way (ADR-0016). A script maintainer cannot pin their own change (ADR-0008, ADR-0013, ADR-0016)."
     },
     {
       "unique-id": "data-asset-controller-lease",
@@ -518,6 +518,7 @@
     "docs/adr/0012-images-signed-and-published-by-digest.md",
     "docs/adr/0013-script-content-pinned-and-rolled-out.md",
     "docs/adr/0014-controller-leader-election.md",
-    "docs/adr/0015-zone-controller.md"
+    "docs/adr/0015-zone-controller.md",
+    "docs/adr/0016-provider-api-ca.md"
   ]
 }

@@ -146,3 +146,7 @@ owns, as a v0.1 controller left it, is moved first: its current class and endpoi
 unchanged, under the spec manager, so the labels' apply that follows removes nothing. That is
 the only write faubourg makes to an adopted Provider's spec, and it changes no value.
 `controller-test` covers both.
+
+*Amended 2026-11-09 by ADR-0016:* the CA option this ADR left open exists. A bundle pinned as
+`providerCASource` in the bootstrap policy's parameters replaces the cluster CA in the host's
+kubeconfig; the pod's own calls still use the cluster CA.

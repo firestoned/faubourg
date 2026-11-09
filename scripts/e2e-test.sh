@@ -161,6 +161,13 @@ kubectl -n "$CREDS" create configmap faubourg-install --from-file=install.sh="$W
 SCRIPT_SHA="$(sha256sum "$WORK/install.sh" | cut -d' ' -f1)"
 kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
   -p "{\"data\": {\"scriptSources\": \"ConfigMap/faubourg-install/install.sh@sha256:$SCRIPT_SHA\"}}" >/dev/null
+# The CA the host trusts, pinned the same way (ADR-0016): here the cluster's own, so the host's
+# provider must still reach the API server, now through the bundle the Job mounted.
+kubectl -n "$CREDS" get configmap kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' >"$WORK/api-ca.pem"
+kubectl -n "$CREDS" create configmap api-ca --from-file=ca.pem="$WORK/api-ca.pem" >/dev/null
+CA_SHA="$(sha256sum "$WORK/api-ca.pem" | cut -d' ' -f1)"
+kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+  -p "{\"data\": {\"providerCASource\": \"ConfigMap/api-ca/ca.pem@sha256:$CA_SHA\"}}" >/dev/null
 
 # For checking the host's token from outside: the cluster's address and CA, no client cert.
 SERVER="$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')"
@@ -244,6 +251,10 @@ kubectl -n "$BANLIEUE" patch provider hv01 --subresource=status --type=merge \
 
 echo "--- the bootstrap Job, with the real image"
 eventually "the Job is created and admitted" 60 kubectl -n "$CREDS" get job bootstrap-hv01-g1
+if kubectl -n "$CREDS" get job bootstrap-hv01-g1 -o json | jq -e '
+   .spec.template.spec.volumes | any(.name == "provider-ca" and .configMap.name == "api-ca")' >/dev/null; then
+  pass "it mounts the pinned provider CA (ADR-0016)"
+else fail "the Job" "does not mount the pinned provider CA"; fi
 eventually "the Job completes" 240 bash -c \
   "kubectl -n $CREDS get job bootstrap-hv01-g1 -o json | jq -e '.status.conditions // [] | any(.type == \"Complete\" and .status == \"True\")'"
 JOB_LOG="$(kubectl -n "$CREDS" logs job/bootstrap-hv01-g1 2>&1 || true)"

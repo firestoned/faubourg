@@ -49,6 +49,20 @@ spec:
         has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : []
     # The digest the Job says its script has (ADR-0013). Exactly one entry, or none counts:
     # with two, the container would see the last and this policy the first.
+    # The pinned provider CA, if any (ADR-0016), and the digest the Job says it has.
+    - name: providerCa
+      expression: >-
+        has(params.data) && 'providerCASource' in params.data ? params.data.providerCASource : ''
+    - name: caSha
+      expression: >-
+        has(variables.c.env)
+        && variables.c.env.filter(e, e.name == 'FAUBOURG_PROVIDER_CA_SHA256').size() == 1
+        && has(variables.c.env.filter(e, e.name == 'FAUBOURG_PROVIDER_CA_SHA256')[0].value)
+        ? variables.c.env.filter(e, e.name == 'FAUBOURG_PROVIDER_CA_SHA256')[0].value : ''
+    - name: caShaCount
+      expression: >-
+        has(variables.c.env)
+        ? variables.c.env.filter(e, e.name == 'FAUBOURG_PROVIDER_CA_SHA256').size() : 0
     - name: scriptSha
       expression: >-
         has(variables.c.env)
@@ -76,12 +90,12 @@ spec:
         && (!has(variables.c.env) || variables.c.env.all(e, !has(e.valueFrom)))
       message: "the bootstrap container's environment is literal values only"
     - expression: >-
-        variables.volumes.all(v, v.name in ['credentials', 'placement', 'script', 'kube-api'])
+        variables.volumes.all(v, v.name in ['credentials', 'placement', 'script', 'kube-api', 'provider-ca'])
         && variables.volumes.exists(v, v.name == 'credentials')
         && variables.volumes.exists(v, v.name == 'script')
       message: "a Job here mounts exactly the credentials, optional placement, script and kube-api volumes"
     - expression: >-
-        variables.volumes.all(v, v.name in ['script', 'kube-api'] || has(v.secret))
+        variables.volumes.all(v, v.name in ['script', 'kube-api', 'provider-ca'] || has(v.secret))
       message: "the credentials and placement volumes are Secrets"
     - expression: >-
         variables.volumes.all(v, v.name != 'kube-api'
@@ -109,6 +123,20 @@ spec:
               && ('ConfigMap/' + v.configMap.name + '/' + v.configMap.items[0].key + '@sha256:' + variables.scriptSha)
                  in variables.scripts))
       message: "the script volume mounts one key of a source pinned in scriptSources, and FAUBOURG_SCRIPT_SHA256 is that pin (ADR-0013)"
+    - expression: >-
+        variables.providerCa == ''
+        || variables.providerCa.matches('^ConfigMap/[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[-._a-zA-Z0-9]+@sha256:[0-9a-f]{64}$')
+      message: "providerCASource is empty or one ConfigMap/<name>/<key>@sha256:<64 hex> (ADR-0016)"
+    - expression: >-
+        variables.caShaCount <= 1
+        && (variables.caShaCount == 1) == variables.volumes.exists(v, v.name == 'provider-ca')
+        && variables.volumes.all(v, v.name != 'provider-ca'
+          || (variables.providerCa != '' && variables.caSha != ''
+              && has(v.configMap) && has(v.configMap.name) && has(v.configMap.items)
+              && v.configMap.items.size() == 1
+              && ('ConfigMap/' + v.configMap.name + '/' + v.configMap.items[0].key + '@sha256:' + variables.caSha)
+                 == variables.providerCa))
+      message: "the provider-ca volume mounts the one ConfigMap key pinned in providerCASource, and FAUBOURG_PROVIDER_CA_SHA256 is that pin, once (ADR-0016)"
     - expression: >-
         (!has(variables.c.volumeMounts) || variables.c.volumeMounts.all(m, has(m.readOnly) && m.readOnly))
         && (!has(variables.c.volumeDevices) || variables.c.volumeDevices.size() == 0)

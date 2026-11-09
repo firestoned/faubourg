@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use faubourg_api::bootstrap::{
     ENV_ACCEPTED_HOST_KEY, ENV_ADDRESS, ENV_HOST, ENV_HOST_KEY_POLICY, ENV_PORT, ENV_PROVIDER,
-    ENV_PROVIDER_API_SERVER, ENV_PROVIDER_NAMESPACE, ENV_PROVIDER_SERVICE_ACCOUNT,
-    ENV_REVOKE_PLACEMENT, ENV_SCRIPT_SHA256, KUBE_API_CA_FILE, KUBE_API_TOKEN_FILE,
-    MOUNT_CREDENTIALS, MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_SCRIPT, SCRIPT_FILE, is_fingerprint,
+    ENV_PROVIDER_API_SERVER, ENV_PROVIDER_CA_SHA256, ENV_PROVIDER_NAMESPACE,
+    ENV_PROVIDER_SERVICE_ACCOUNT, ENV_REVOKE_PLACEMENT, ENV_SCRIPT_SHA256, KUBE_API_CA_FILE,
+    KUBE_API_TOKEN_FILE, MOUNT_CREDENTIALS, MOUNT_KUBE_API, MOUNT_PLACEMENT, MOUNT_PROVIDER_CA,
+    MOUNT_SCRIPT, PROVIDER_CA_FILE, SCRIPT_FILE, is_fingerprint,
 };
 use faubourg_api::validation::{is_dns_label, is_dns_subdomain};
 
@@ -68,7 +69,8 @@ pub struct ProviderInputs {
     pub target: Target,
     /// The pod's own token and CA, as files.
     pub access: PodAccess,
-    /// The cluster CA, for the host's kubeconfig.
+    /// What the host trusts for the API server, written into its kubeconfig: the bundle the
+    /// bootstrap policy pins (ADR-0016), or the cluster CA when it pins none.
     pub ca_pem: Vec<u8>,
 }
 
@@ -120,6 +122,10 @@ pub enum ConfigError {
     /// The mounted install script is not the one the bootstrap policy pins (ADR-0013).
     #[error("the mounted install script is not the one pinned in the bootstrap policy")]
     ScriptUnpinned,
+    /// The mounted provider CA is not the one the bootstrap policy pins, or holds no
+    /// certificate (ADR-0016).
+    #[error("the mounted provider CA is not the one pinned in the bootstrap policy")]
+    ProviderCaUnpinned,
 }
 
 impl Config {
@@ -237,7 +243,12 @@ fn provider_inputs(
         return Err(ConfigError::Unreadable(token_file));
     }
     let ca_file = dir.join(KUBE_API_CA_FILE);
-    let ca_pem = std::fs::read(&ca_file).map_err(|_| ConfigError::Unreadable(ca_file.clone()))?;
+    let cluster_ca =
+        std::fs::read(&ca_file).map_err(|_| ConfigError::Unreadable(ca_file.clone()))?;
+    let ca_pem = match get(ENV_PROVIDER_CA_SHA256) {
+        None => cluster_ca,
+        Some(pin) => pinned_provider_ca(&pin, root)?,
+    };
     Ok(Some(ProviderInputs {
         target: Target {
             provider,
@@ -252,6 +263,23 @@ fn provider_inputs(
         },
         ca_pem,
     }))
+}
+
+/// The mounted provider CA, if it is the pinned one and holds a certificate (ADR-0016). Checked
+/// before any connection, to the API server or to the host.
+fn pinned_provider_ca(pin: &str, root: &Path) -> Result<Vec<u8>, ConfigError> {
+    if pin.len() != 64 || !pin.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(ConfigError::InvalidEnv(ENV_PROVIDER_CA_SHA256));
+    }
+    let file = under(root, MOUNT_PROVIDER_CA).join(PROVIDER_CA_FILE);
+    let bundle = std::fs::read(&file).map_err(|_| ConfigError::Unreadable(file))?;
+    let has_certificate = bundle
+        .windows(b"-----BEGIN CERTIFICATE-----".len())
+        .any(|w| w == b"-----BEGIN CERTIFICATE-----");
+    if crate::sha256_hex(&bundle) != pin || !has_certificate {
+        return Err(ConfigError::ProviderCaUnpinned);
+    }
+    Ok(bundle)
 }
 
 /// The API server from inside the cluster: the kubelet's `KUBERNETES_SERVICE_*`, or the
@@ -507,6 +535,83 @@ mod tests {
                 .ends_with("/var/run/faubourg/kube-api/token")
         );
         assert_eq!(p.ca_pem, b"-----BEGIN CERTIFICATE-----\n");
+    }
+
+    const CA: &str = "-----BEGIN CERTIFICATE-----\nTHE LOAD BALANCER\n-----END CERTIFICATE-----\n";
+
+    fn with_provider_ca(r: &Path, content: &str) -> String {
+        let d = under(r, MOUNT_PROVIDER_CA);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(PROVIDER_CA_FILE), content).unwrap();
+        crate::sha256_hex(content.as_bytes())
+    }
+
+    #[test]
+    fn a_pinned_provider_ca_is_what_the_host_trusts() {
+        let r = root();
+        with_kube_api(&r);
+        let pin = with_provider_ca(&r, CA);
+        let mut vars = provider_env();
+        vars.push((ENV_PROVIDER_CA_SHA256, &pin));
+        let p = Config::load(&env(&vars), &r).unwrap().provider.unwrap();
+        assert_eq!(
+            p.ca_pem,
+            CA.as_bytes(),
+            "the pinned bundle, not the cluster CA"
+        );
+        assert!(
+            p.access
+                .ca_file
+                .ends_with("/var/run/faubourg/kube-api/ca.crt"),
+            "the pod's own calls still trust the cluster CA"
+        );
+    }
+
+    #[test]
+    fn a_provider_ca_that_is_not_the_pinned_one_is_refused() {
+        let r = root();
+        with_kube_api(&r);
+        let pin = with_provider_ca(&r, CA);
+        // Edited after pinning.
+        with_provider_ca(
+            &r,
+            "-----BEGIN CERTIFICATE-----\nSOMEONE ELSE\n-----END CERTIFICATE-----\n",
+        );
+        let mut vars = provider_env();
+        vars.push((ENV_PROVIDER_CA_SHA256, &pin));
+        assert!(matches!(
+            Config::load(&env(&vars), &r),
+            Err(ConfigError::ProviderCaUnpinned)
+        ));
+        // Pinned, but no certificate in it.
+        let r = root();
+        with_kube_api(&r);
+        let pin = with_provider_ca(&r, "not a certificate\n");
+        let mut vars = provider_env();
+        vars.push((ENV_PROVIDER_CA_SHA256, &pin));
+        assert!(matches!(
+            Config::load(&env(&vars), &r),
+            Err(ConfigError::ProviderCaUnpinned)
+        ));
+        // Pinned, but not mounted.
+        let r = root();
+        with_kube_api(&r);
+        let mut vars = provider_env();
+        vars.push((ENV_PROVIDER_CA_SHA256, &pin));
+        assert!(matches!(
+            Config::load(&env(&vars), &r),
+            Err(ConfigError::Unreadable(_))
+        ));
+        // A malformed pin.
+        let r = root();
+        with_kube_api(&r);
+        with_provider_ca(&r, CA);
+        let mut vars = provider_env();
+        vars.push((ENV_PROVIDER_CA_SHA256, "<your-ca-sha256>"));
+        assert!(matches!(
+            Config::load(&env(&vars), &r),
+            Err(ConfigError::InvalidEnv(ENV_PROVIDER_CA_SHA256))
+        ));
     }
 
     #[test]

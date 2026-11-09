@@ -56,6 +56,14 @@ pub const ENV_ACCEPTED_HOST_KEY: &str = "FAUBOURG_ACCEPTED_HOST_KEY";
 pub const ENV_REVOKE_PLACEMENT: &str = "FAUBOURG_REVOKE_PLACEMENT";
 /// The sha256 the bootstrap policy pins for the mounted script (ADR-0013 decision 4).
 pub const ENV_SCRIPT_SHA256: &str = "FAUBOURG_SCRIPT_SHA256";
+/// The sha256 the bootstrap policy pins for the mounted provider CA (ADR-0016), when one is.
+pub const ENV_PROVIDER_CA_SHA256: &str = "FAUBOURG_PROVIDER_CA_SHA256";
+/// The volume holding the CA the hosts trust for the API server (ADR-0016).
+pub const VOLUME_PROVIDER_CA: &str = "provider-ca";
+/// Where it is mounted.
+pub const MOUNT_PROVIDER_CA: &str = "/var/run/faubourg/provider-ca";
+/// The bundle's file in it.
+pub const PROVIDER_CA_FILE: &str = "ca.crt";
 /// Env: the host's Provider (ADR-0011 decision 1).
 pub const ENV_PROVIDER: &str = "FAUBOURG_PROVIDER";
 /// Env: the Provider's namespace.
@@ -82,6 +90,9 @@ pub const EXIT_HOST_KEY_REFUSED: i32 = 65;
 /// 4). Nothing was connected to. Fails the Job at once: only a re-pin or the pinned content
 /// fixes it.
 pub const EXIT_SCRIPT_UNPINNED: i32 = 66;
+/// Exit code: the mounted provider CA is not the one the bootstrap policy pins (ADR-0016), or
+/// holds no certificate. Nothing was connected to. Fails the Job at once.
+pub const EXIT_PROVIDER_CA_UNPINNED: i32 = 67;
 
 /// The bootstrap container's termination message (ADR-0010 decision 7), as JSON.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
