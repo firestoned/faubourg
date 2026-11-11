@@ -31,3 +31,7 @@ banlieue ADR-0036 phases live migration separately.
   per workload before putting it on this platform.
 - No storage backend, migration network or fencing hardware to operate in v1.
 - `Shared` returns as its own ADR, with fencing as a requirement.
+
+*Amended 2026-11-11, by ADR-0017 decision 6:* Decision 3 now reads "no migration through
+shared storage; a VM moves only by copy, between hosts of one `Local` zone, performed by
+banlieue (banlieue ADR-0127)". Decision 4 (no fencing) is unchanged.

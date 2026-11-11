@@ -106,6 +106,22 @@ The zone controller writes each `AvailabilityZone`'s status from its hosts, and 
 
 It is a report, not a gate: a zone with no ready host still bootstraps its first one.
 
+A second condition, `HostsMatch`, says whether the zone's hosts could take each other's VMs
+([ADR-0017](adr/0017-host-drain-moves-vms-through-banlieue.md) decision 9). banlieue moves a VM
+only between hosts running the same VMM version on the same CPU model, and each host's
+Provider publishes both (`raw.vmm` and `raw.cpuModel` on its failure domain):
+
+| Reason | `HostsMatch` | When |
+| --- | --- | --- |
+| `HostsDiffer` | False | members report different pairs; the ones that differ from the most common are named |
+| `HostsUnreported` | Unknown | a member's Provider lacks either value, or none reports |
+| `HostsMatch` | True | every member that has a Provider reports the same pair |
+
+A host whose Provider does not exist yet is not counted. `HostsMatch` never changes `Ready`.
+A zone also promises something faubourg cannot check: its hosts share the L2 segments behind
+their network classes, so a moved VM keeps its MAC and addresses. Do not put hosts on
+different networks in one zone.
+
 ```sh
 kubectl get availabilityzones
 # NAME   STORAGE   HOSTS   READY   CORDONED
@@ -117,9 +133,11 @@ kubectl get availabilityzones
 Every v1 zone is `storage.mode: Local` ([ADR-0004](adr/0004-v1-local-storage-only.md)). A VM's
 disks live on its host, so:
 
-- there is no live migration and no fencing;
+- there is no fencing, and no shared disk to migrate through;
 - losing a host loses the VMs on it, and recovery means recreating them from a pool or image
-  on a healthy host, which banlieue already does for pool members.
+  on a healthy host, which banlieue already does for pool members;
+- a VM can move to another host of its zone only by copy, while both hosts are up, done by
+  banlieue when a host is drained (ADR-0017 and banlieue ADR-0127, planned: roadmap 03).
 
 `Shared` is in the schema so the API will not break when it arrives, but faubourg refuses it
 today: the zone is `Ready=False` with reason `StorageModeUnsupported`.

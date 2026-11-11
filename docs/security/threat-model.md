@@ -4,11 +4,16 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Threat Model
 
-> **Status:** Living document. Last full pass **2026-11-08**, against the architecture
-> defined by **ADR-0001 … ADR-0016** (all Accepted;
+> **Status:** Living document. Last full pass **2026-11-11**, against the architecture
+> defined by **ADR-0001 … ADR-0017** (all Accepted;
 > ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended, ADR-0009
 > decision 1 superseded by ADR-0014, ADR-0003 amended after banlieue ADR-0124, ADR-0011 amended
-> by ADR-0016 and after banlieue ADR-0126). Fourteenth pass: faubourg reads the provider's
+> by ADR-0016 and after banlieue ADR-0126, ADR-0004 and ADR-0015 amended by ADR-0017).
+> Fifteenth pass, for ADR-0017 (host drain through banlieue VM moves): of its decisions only
+> the zone's advisory `HostsMatch` condition is implemented, which reads the members' Providers
+> the controller already read; the zone label for banlieue, the drain, and the RBAC on
+> banlieue `VirtualMachine`s and `VirtualMachineMove`s are not built, and their rows come
+> with them (roadmap 03). Fourteenth pass: faubourg reads the provider's
 > ServiceAccount name from banlieue instead of deriving it, which closes R-10 and roadmap 01.
 > The thirteenth pinned the CA hosts trust for the API server (ADR-0016). The twelfth closed R-4 (a cordon reaches banlieue's scheduler). The
 > eleventh added the zone controller (ADR-0015), the tenth leader election (ADR-0014), the
@@ -168,6 +173,8 @@ flowchart LR
 | A replica starts with no identity, or with another's, and takes the Lease as its own | S, T | It refuses to start without `POD_NAME` from the downward API, and never guesses one (`config.rs`, `the_controller_needs_a_well_formed_identity_to_elect`; `controller-test`). Pod names are unique in a namespace. |
 | A zone's status is forged or stale, and an operator places VMs on a zone that cannot take them | S, T | Of faubourg's identities only the controller writes `availabilityzones/status`, under its own field manager (`deploy/rbac/controller.yaml`, `zone.rs`, `FIELD_MANAGER`); anyone else who can is a cluster administrator. The status is a report: nothing faubourg decides reads it (ADR-0015 decision 6), and banlieue places by Provider labels, not by it. A stale count lasts at most until the next Host event or resync. |
 | The zone controller writes more than a zone's status | T | It applies status only, and `controller-test` checks every entry of its field manager is on the `status` subresource ("the zone controller writes status only"). |
+| A zone reports `HostsMatch` from a Provider that is not its member's (another zone's host, an unlabelled one, or one of two claiming a host), and an operator drains into a host that cannot take the VM | S, T | Only the one Provider labelled with a member Host counts; two for one host are `HostsUnreported`, never a match (`zone.rs`, `report`; `providers_of_other_zones_hosts_are_ignored`, `two_providers_claiming_one_host_are_unreported`). The condition is advisory: nothing faubourg decides reads it, and banlieue admits or refuses every move on its own check (banlieue ADR-0127 decision 3). A forged Provider status is banlieue's boundary (row below). |
+| A zone's status discloses its hosts' VMM build and CPU model | I | Already in each Provider's status, readable by whoever reads Providers; the zone copies only the most common pair and the names of the hosts that differ, bounded to ten (`zone.rs`, `named`, `the_named_hosts_are_bounded`). No address, credential or Secret value. |
 | A zone reports Ready while every usable host is cordoned, or counts a host from another zone | T | `Ready` needs a member that is `Ready` and not cordoned; membership is the Host's `zoneRef` alone (`zone.rs`, `a_zone_whose_ready_hosts_are_all_cordoned_is_not_ready`, `a_zone_with_no_hosts_is_not_ready`; `controller-test`: "a host moving out empties its old zone"). |
 | A deleted Host leaves a Job running with its credentials mounted | I | Jobs are owned by their Host and garbage collected with it (`controller-test`: "the Job is garbage collected"). |
 | The controller reads more of banlieue's namespace than Providers | I | A Role there grants `get`, `list`, `watch`, `create`, `patch` on `providers.banlieue.io` only: no delete, no Secret, no `serviceaccounts/token` (`deploy/rbac/controller.yaml`; `vap-test` checks each). |
@@ -345,3 +352,4 @@ flowchart LR
 | 2026-11-09 | 0001 … 0015 | Twelfth pass: ADR-0003 amended after banlieue ADR-0124. A cordon sets `banlieue.io/unschedulable`, which banlieue's scheduler enforces; **R-4 closed** for banlieue v0.5.3 and later. One TB-1 row (a zone cordoning its members through that key, refused). banlieue's side found and fixed a gap in its liveness filter that moved placed VMs; recorded in banlieue's threat model. No new boundary, actor or permission. |
 | 2026-11-09 | 0001 … 0016 | Thirteenth pass: ADR-0016 (the provider CA, Accepted) and the ADR-0011 amendment. A-8 gains `providerCASource`; one TB-6 row (a substituted CA, which would hand a host's token to an impersonator), controlled by the policy, the image's digest check (exit 67) and A-8's ownership. No new boundary, actor or permission. |
 | 2026-11-09 | 0001 … 0016 | Fourteenth pass: the ADR-0011 amendment after banlieue ADR-0126. faubourg mints for the ServiceAccount name banlieue publishes and never derives one; **R-10 closed**, and with it roadmap 01. No new boundary, actor or permission; the controller already read Providers. |
+| 2026-11-11 | 0001 … 0017 | Fifteenth pass: ADR-0017 (host drain through banlieue VM moves, Accepted), ADR-0004 decision 3 and ADR-0015 amended. Implemented so far: the zone's advisory `HostsMatch` from members' `raw.vmm` and `raw.cpuModel`; two TB-1 rows (a report from the wrong Provider; what the condition discloses). No new component, identity, permission or boundary yet: the controller already read Providers, and §5's diagram is unchanged. The drain's rows (asking banlieue to move any VM on a managed host, cluster-wide read of VMs, the zone label as a network promise) are written when it is built, not before. |

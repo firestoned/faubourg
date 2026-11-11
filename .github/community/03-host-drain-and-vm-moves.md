@@ -7,8 +7,9 @@ Implements ADR-0017: `Host.spec.maintenance: Drain` empties a host by asking ban
 each of its VMs to another host of the same zone. faubourg decides when and which host; banlieue
 decides where and performs the move (banlieue ADR-0127, its roadmap 14). ADD cycle per item.
 
-**Status: accepted 2026-11-11, not started.** ADR-0017 is Proposed, revised 2026-11-11 with
-decisions 8 to 10 from the open questions below; banlieue ADR-0127 is Proposed (2026-11-10).
+**Status: in progress.** ADR-0017 Accepted 2026-11-11 (decisions 8 to 10 from the open
+questions below); banlieue ADR-0127 is Proposed (2026-11-10). `HostsMatch` is done; everything
+else waits for banlieue's `VirtualMachineMove` and `banlieue.io/zone` in `banlieue-api`.
 
 ## What a drain can move, by banlieue stage
 
@@ -48,7 +49,8 @@ block the drain.
 
 ## Work
 
-- [ ] ADR-0017 accepted, with the answers above; ADR-0004 decision 3 marked amended
+- [x] ADR-0017 accepted, with the answers above; ADR-0004 decision 3 and ADR-0015 marked amended
+- [x] CALM for `HostsMatch`: the zone controller reads its members' Providers
 - [ ] CALM: faubourg's controller gains the relationship to banlieue `VirtualMachine`s (read)
   and `VirtualMachineMove`s (create, read, delete); `make calm-validate`
 - [ ] `banlieue-api` bumped to the release that exports `LABEL_ZONE` and the
@@ -56,9 +58,10 @@ block the drain.
 - [ ] Decision 1: `banlieue.io/zone: <zone>` on each member host's Provider, by the existing
   field manager and server-side apply, removed when the Host leaves the zone; reserved in
   zones beside `banlieue.io/unschedulable`; `make controller-test` checks set and removal
-- [ ] Decision 9: zone condition `HostsMatch` from members' `raw.vmm` and `raw.cpuModel`
-  (`HostsDiffer`, `HostsUnreported`), advisory, not part of `Ready`; first, as it needs nothing
-  from banlieue
+- [x] Decision 9: zone condition `HostsMatch` from members' `raw.vmm` and `raw.cpuModel`
+  (`HostsDiffer`, `HostsUnreported`), advisory, not part of `Ready`; the zone controller wakes on
+  a member Provider's change (`zone.rs`; `controller-test`); docs in `docs/concepts.md`;
+  threat-model fifteenth pass
 - [ ] Decision 2: `Host.spec.maintenance` (`None` | `Drain`), CRD regenerated (`make crds`);
   `Drain` implies the cordon labels
 - [ ] Fail closed: with no `VirtualMachineMove` CRD served, `Drain` sets `Drained=False`,

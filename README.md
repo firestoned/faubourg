@@ -38,8 +38,10 @@ failure domains. faubourg adds what banlieue has no object for
 - **zone health** from the providers' own heartbeats, with no faubourg agent
   ([ADR-0007](docs/adr/0007-health-from-the-banlieue-provider.md)).
 
-v1 zones use **local storage only**: no live migration, no fencing
-([ADR-0004](docs/adr/0004-v1-local-storage-only.md)).
+v1 zones use **local storage only**: no shared disks, no fencing
+([ADR-0004](docs/adr/0004-v1-local-storage-only.md)). Draining a host by moving its VMs to
+another host of the zone, done by banlieue, is planned
+([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md), [roadmap 03](.github/community/03-host-drain-and-vm-moves.md)).
 
 ```yaml
 apiVersion: faubourg.firestoned.io/v1alpha1
@@ -75,6 +77,7 @@ exists; read its accepted risks before deploying, and expect the API to change b
 | [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented; v0.1.0 and v0.1.1 released and verified |
 | A run against a real hypervisor | done: one host adopted, then bootstrapped from nothing ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller ([ADR-0015](docs/adr/0015-zone-controller.md)) and cordon | implemented: zone health, and a cordon banlieue enforces (banlieue v0.5.3 and later), tested on kind ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
+| Host drain through banlieue VM moves ([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md)) | in progress: a zone reports `HostsMatch` (same VMM and CPU model on every host); the drain waits for banlieue's `VirtualMachineMove` ([roadmap 03](.github/community/03-host-drain-and-vm-moves.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
 The status board is [`ROADMAPS.md`](ROADMAPS.md).

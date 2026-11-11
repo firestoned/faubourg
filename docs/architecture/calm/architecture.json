@@ -29,7 +29,7 @@
       "unique-id": "service-zone-controller",
       "node-type": "service",
       "name": "Zone controller",
-      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015)."
+      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. Also HostsMatch (HostsDiffer, HostsUnreported), advisory: whether every member's Provider reports the same raw.vmm and raw.cpuModel, which banlieue requires to move a VM between them (ADR-0017 decision 9). A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015)."
     },
     {
       "unique-id": "service-bootstrap-job",
@@ -295,7 +295,7 @@
     },
     {
       "unique-id": "rel-zone-controller-kube",
-      "description": "Reads AvailabilityZones and Hosts; patches availabilityzones/status only (ADR-0015).",
+      "description": "Reads AvailabilityZones, Hosts and the members' Providers; patches availabilityzones/status only (ADR-0015, ADR-0017).",
       "relationship-type": {
         "connects": {
           "source": {

@@ -70,3 +70,9 @@ A zone is the sum of its hosts, and its status should say exactly that, nothing 
 - Cordon stays advisory for banlieue (R-4). The zone status makes it visible; a VM excludes
   cordoned hosts with `faubourg.firestoned.io/cordoned DoesNotExist` in its `providerSelector`,
   which banlieue's scheduler honours today.
+
+*Amended 2026-11-11, by ADR-0017 decision 9:* the zone controller also reads its members'
+`Provider`s (the one labelled with each Host, ADR-0009 decision 5), and writes a second,
+advisory condition, `HostsMatch`, from their `raw.vmm` and `raw.cpuModel`. Decision 5 becomes
+a pure function of the zone, its Hosts and their Providers; decision 2's RBAC is unchanged,
+since the controller already reads Providers. `HostsMatch` does not change `Ready`.

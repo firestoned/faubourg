@@ -375,6 +375,15 @@ eventually "a Shared zone is refused (ADR-0004)" 30 zone_is zh-shared False Stor
 host hv13 zh-a hv13.home.example None
 provider hv13 hv13
 eventually "a zone whose host is Ready is Ready" 60 zone_is zh-a True HostsReady 1 1 0
+match_is() { # zone, HostsMatch status, reason
+  kubectl get availabilityzone "$1" -o json | jq -e --arg s "$2" --arg r "$3" \
+    '.status.conditions | any(.type == "HostsMatch" and .status == $s and .reason == $r)' >/dev/null
+}
+eventually "a Provider reporting no VMM or CPU is HostsUnreported (ADR-0017)" 30 \
+  match_is zh-a Unknown HostsUnreported
+kubectl -n "$BANLIEUE" patch provider hv13 --subresource=status --type=merge -p '{"status": {
+  "failureDomains": [{"name": "hv13", "attributes": {"raw": {"vmm": "cloud-hypervisor v53.0", "cpuModel": "test cpu"}}}]}}' >/dev/null
+eventually "a Provider's report wakes the zone: HostsMatch" 30 match_is zh-a True HostsMatch
 kubectl patch host hv13 --type=merge -p '{"spec": {"cordoned": true}}' >/dev/null
 eventually "a zone whose only Ready host is cordoned is not" 30 zone_is zh-a False AllReadyHostsCordoned 1 1 1
 kubectl patch host hv13 --type=merge -p '{"spec": {"zoneRef": "zh-b", "cordoned": false}}' >/dev/null

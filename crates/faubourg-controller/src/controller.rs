@@ -164,19 +164,27 @@ pub async fn run(client: Client, cfg: Config) {
 async fn run_zones(ctx: Arc<Ctx>) {
     // Status only. Any Host event re-reconciles every zone: a Host moving from one zone to
     // another changes both, and its event names only the new one.
+    // A member's Provider changing its VMM or CPU model changes HostsMatch (ADR-0017).
     let zone_controller = Controller::new(ctx.zones.clone(), watcher::Config::default());
     let zones = zone_controller.store();
+    let all_zones = move || {
+        zones
+            .state()
+            .into_iter()
+            .map(|z| ObjectRef::from_obj(&*z))
+            .collect::<Vec<_>>()
+    };
+    let on_provider = all_zones.clone();
     zone_controller
         .watches(
             ctx.hosts.clone(),
             watcher::Config::default(),
-            move |_: Host| {
-                zones
-                    .state()
-                    .into_iter()
-                    .map(|z| ObjectRef::from_obj(&*z))
-                    .collect::<Vec<_>>()
-            },
+            move |_: Host| all_zones(),
+        )
+        .watches(
+            ctx.providers.clone(),
+            watcher::Config::default().labels(LABEL_HOST),
+            move |_: Provider| on_provider(),
         )
         .shutdown_on_signal()
         .run(reconcile_zone, error_policy_zone, ctx)
@@ -195,7 +203,13 @@ async fn run_zones(ctx: Arc<Ctx>) {
 /// Writes a zone's status from its Hosts, when it changed (ADR-0015).
 async fn reconcile_zone(az: Arc<AvailabilityZone>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let hosts = ctx.hosts.list(&ListParams::default()).await?.items;
-    let status = zone::status(&az, &hosts, &Time(Timestamp::now()));
+    // The members' Providers, for HostsMatch (ADR-0017 decision 9).
+    let providers = ctx
+        .providers
+        .list(&ListParams::default().labels(LABEL_HOST))
+        .await?
+        .items;
+    let status = zone::status(&az, &hosts, &providers, &Time(Timestamp::now()));
     if az.status.as_ref() != Some(&status) {
         let name = az.name_any();
         let patch = serde_json::json!({
