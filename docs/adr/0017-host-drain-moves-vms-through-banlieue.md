@@ -3,8 +3,8 @@
 
 # ADR-0017: Draining a host asks banlieue to move its VMs within the zone
 
-**Status:** Proposed · **Date:** 2026-11-10 · **Revised:** 2026-11-11 (decisions 8 to 10,
-from roadmap 03's open questions)
+**Status:** Accepted · **Date:** 2026-11-10 · **Revised:** 2026-11-11 (decisions 8 to 10,
+from roadmap 03's open questions) · **Accepted:** 2026-11-11
 
 Amends ADR-0004 Decision 3 and ADR-0003 Decision 4. The moving side is banlieue ADR-0127.
 
