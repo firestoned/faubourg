@@ -3,7 +3,8 @@
 
 # ADR-0017: Draining a host asks banlieue to move its VMs within the zone
 
-**Status:** Proposed · **Date:** 2026-11-10
+**Status:** Proposed · **Date:** 2026-11-10 · **Revised:** 2026-11-11 (decisions 8 to 10,
+from roadmap 03's open questions)
 
 Amends ADR-0004 Decision 3 and ADR-0003 Decision 4. The moving side is banlieue ADR-0127.
 
@@ -46,7 +47,11 @@ owns the host agent and VM placement).
    lists the `VirtualMachine`s whose `status.scheduled.providerName` is the host's `Provider`
    and creates a `VirtualMachineMove` for each in the VM's namespace, with **no target**:
    banlieue picks the destination inside the zone with its scheduler, which knows capacity and
-   spread and faubourg does not. At most a fixed number of moves per draining host are in
+   spread and faubourg does not. Among the hosts that admit the move, the one with the most
+   free memory after it wins, free vCPUs breaking a tie: a drain spreads its VMs across the
+   zone instead of piling them onto one neighbour, and every host keeps headroom. This ranking
+   is for moves only; new placements keep banlieue's spread (its ADR-0098). It is banlieue's to
+   implement (raised for its ADR-0127 decision 2). At most a fixed number of moves per draining host are in
    flight at once (a named constant, starting at one, raised only by measurement). faubourg
    labels each move with the Host's name, so a drain's moves can be listed and cancelled
    together.
@@ -75,6 +80,31 @@ owns the host agent and VM placement).
    `virtualmachinemoves`. No `update` or `patch` on `virtualmachines`, no access to
    `cloudhypervisormachines`, no Secrets. The `Provider` label set grows by one key.
 
+8. **Pool members are moved like any VM; faubourg never special-cases them.** An unclaimed
+   member (a `banlieue.io/pool` label and no `banlieue.io/claim`) may well be cheaper to
+   replace than to move, but replacing it means deleting a VM, which faubourg never does
+   (decision 4), and which only the pool may do to its own members. So faubourg asks for a move
+   of every VM on the host, members included, and banlieue decides how to satisfy a move of an
+   unclaimed member (move it, or let its pool replace it elsewhere and report the move done).
+   That choice belongs in banlieue's ADR-0127, not here.
+
+9. **A zone reports whether its hosts can take each other's VMs.** banlieue admits a move
+   only between hosts with the same VMM version and CPU model (banlieue ADR-0127 decision 3).
+   The zone controller (ADR-0015) reads both from its members' Providers (the failure domain's
+   `attributes.raw.vmm` and `attributes.raw.cpuModel`, which the Cloud Hypervisor provider
+   already publishes) and sets a zone condition **`HostsMatch`**: `True` when every member
+   with a Provider reports the same pair, `False` with reason `HostsDiffer` naming the hosts
+   that differ from the most common pair (bounded), and `Unknown` with reason
+   `HostsUnreported` while a member's Provider lacks either field. It is advisory: it does not
+   change `Ready`, and a drain still runs, so banlieue's own check stays the one that admits a
+   move. The L2 promise of decision 1 cannot be observed and is stated in the zone docs only.
+
+10. **banlieue owns the key.** faubourg spells neither `banlieue.io/zone` nor
+    `VirtualMachineMove`'s group or fields: both come from `banlieue-api` (as
+    `LABEL_UNSCHEDULABLE` does), so decision 1 waits for the `banlieue-api` release that
+    exports them. faubourg reserves `banlieue.io/zone` in a zone's labels, as it reserves
+    `banlieue.io/unschedulable`.
+
 ## Consequences
 
 - An operator drains a host with one field, and the zone keeps its VMs running, with a pause
@@ -86,7 +116,12 @@ owns the host agent and VM placement).
   `AvailabilityZone` validation must say so; a mixed-network zone breaks moved guests'
   addresses rather than failing a check.
 - Depends on banlieue ADR-0127 being implemented (Stage 1 at least) and on banlieue honouring
-  `banlieue.io/zone`. Until then `maintenance: Drain` must fail closed: faubourg refuses it
+  `banlieue.io/zone`. ADR-0127 must also settle which `CloudHypervisorMachine` a moved VM uses
+  afterwards: banlieue's VM reconciler finds a VM's machine by the VM's own name, and the
+  destination machine is named `<vm>-<move id>`, so without that a move is followed by a
+  recreate (roadmap 03).
+- Until banlieue's Stage 2, every VM with a vTPM (every sealed pool member) is reported
+  blocked: a drain empties a host of non-vTPM VMs only. Until then `maintenance: Drain` must fail closed: faubourg refuses it
   with a condition when the cluster has no `VirtualMachineMove` CRD.
 - Threat model: a new row for a compromised or misconfigured faubourg asking banlieue to move
   VMs (D: moves churn a zone; mitigated by banlieue's admission checks and the in-flight limit)

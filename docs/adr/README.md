@@ -21,3 +21,4 @@
 | [0014](0014-controller-leader-election.md) | The controller elects a leader through a Lease | Accepted |
 | [0015](0015-zone-controller.md) | The zone controller reports each zone's health from its hosts | Accepted |
 | [0016](0016-provider-api-ca.md) | The CA hosts trust for the API server can be set, pinned by digest | Accepted |
+| [0017](0017-host-drain-moves-vms-through-banlieue.md) | Draining a host asks banlieue to move its VMs within the zone | Proposed |
