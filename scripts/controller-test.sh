@@ -407,6 +407,86 @@ kubectl delete host hv13 >/dev/null
 kubectl -n "$BANLIEUE" delete provider hv13 >/dev/null
 kubectl delete availabilityzone zh-a zh-shared zh-b >/dev/null
 
+echo "--- draining a host asks banlieue to move its VMs (ADR-0017)"
+# banlieue is played by hand: VMs scheduled on the host, and each move's phase set directly.
+kubectl create namespace apps >/dev/null
+host hvd1 az1 hvd1.home.example None
+provider hvd1 hvd1
+eventually "the host to drain is Ready" 60 phase_is hvd1 Ready
+vm() { # name, provider it is scheduled on
+  kubectl apply -f - >/dev/null <<EOF
+{"apiVersion": "banlieue.io/v1alpha1", "kind": "VirtualMachine", "metadata": {"name": "$1", "namespace": "apps"},
+ "spec": {"classRef": {"name": "small"}, "imageRef": {"name": "img"}}}
+EOF
+  kubectl -n apps patch virtualmachine "$1" --subresource=status --type=merge -p "{\"status\": {
+    \"scheduled\": {\"providerName\": \"$2\", \"providerClass\": \"cloud-hypervisor\", \"failureDomain\": \"$2\"}}}" >/dev/null
+}
+vm sealed-0 hvd1
+vm web-0 hvd1
+vm elsewhere-0 not-this-host
+moves_of() {
+  kubectl -n apps get virtualmachinemoves -l faubourg.firestoned.io/host=hvd1 -o json \
+    | jq -r '[.items[].spec.vmRef.name] | sort | join(" ")'
+}
+moves_are() { [ "$(moves_of)" = "$1" ]; }
+move_name() {
+  kubectl -n apps get virtualmachinemoves -l faubourg.firestoned.io/host=hvd1 -o json \
+    | jq -r --arg vm "$1" '.items[] | select(.spec.vmRef.name == $vm) | .metadata.name'
+}
+move_phase() { # vm, phase[, Admitted=False reason]
+  local adm=""
+  [ -n "${3:-}" ] && adm=", \"conditions\": [{\"type\": \"Admitted\", \"status\": \"False\", \"reason\": \"$3\", \"message\": \"\", \"lastTransitionTime\": \"2026-11-14T00:00:00Z\"}]"
+  kubectl -n apps patch virtualmachinemove "$(move_name "$1")" --subresource=status --type=merge \
+    -p "{\"status\": {\"phase\": \"$2\"$adm}}" >/dev/null
+}
+drained_is() { # host, status, reason[, text the message contains]
+  kubectl get host "$1" -o json | jq -e --arg s "$2" --arg r "$3" --arg m "${4:-}" '
+    .status.conditions | any(.type == "Drained" and .status == $s and .reason == $r and (.message | contains($m)))' >/dev/null
+}
+no_drained() { kubectl get host "$1" -o json | jq -e '.status.conditions | all(.type != "Drained")' >/dev/null; }
+unschedulable_is() { # provider, expected value ("" for none)
+  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.banlieue\.io/unschedulable}')" = "$2" ]
+}
+move_count() { kubectl -n apps get virtualmachinemoves -o name | wc -l | tr -d ' '; }
+more_than_two_moves() { [ "$(move_count)" -gt 2 ]; }
+kubectl patch host hvd1 --type=merge -p '{"spec": {"maintenance": "Drain"}}' >/dev/null
+eventually "a drain cordons the host" 30 unschedulable_is hvd1 true
+eventually "one move, for the first VM" 30 moves_are sealed-0
+if kubectl -n apps get virtualmachinemove "$(move_name sealed-0)" -o json | jq -e '.spec | has("target") | not' >/dev/null; then
+  pass "the move leaves the destination to banlieue"
+else fail "the move" "names a target"; fi
+eventually "the host is Draining" 30 drained_is hvd1 False Draining
+never "one move at a time" 5 moves_are "sealed-0 web-0"
+move_phase sealed-0 Rejected VTPMNotMovable
+eventually "a rejected move frees the slot for the next VM" 40 moves_are "sealed-0 web-0"
+eventually "and the blocked VM is named with banlieue's reason" 30 \
+  drained_is hvd1 False MovesBlocked "apps/sealed-0 (VTPMNotMovable)"
+never "the rejected move is never asked again" 5 more_than_two_moves
+move_phase web-0 Copying
+kubectl patch host hvd1 --type=merge -p '{"spec": {"maintenance": "None"}}' >/dev/null
+eventually "ending the drain cancels the move still copying" 40 moves_are sealed-0
+eventually "and keeps the rejected one; Drained goes" 30 no_drained hvd1
+eventually "the drain's cordon goes with it" 30 unschedulable_is hvd1 ""
+if kubectl -n apps get virtualmachine sealed-0 web-0 elsewhere-0 >/dev/null 2>&1; then pass "no VM was deleted"
+else fail "the VMs" "one was deleted"; fi
+SA=system:serviceaccount:faubourg-system:faubourg-controller
+for verb in patch update delete; do
+  if [ "$(kubectl auth can-i "$verb" virtualmachines.banlieue.io -n apps --as="$SA")" = no ]; then
+    pass "the controller cannot $verb a VirtualMachine"
+  else fail "RBAC" "the controller can $verb a VirtualMachine"; fi
+done
+for verb in create delete list; do
+  if [ "$(kubectl auth can-i "$verb" virtualmachinemoves.banlieue.io -n apps --as="$SA")" = yes ]; then
+    pass "the controller can $verb a VirtualMachineMove"
+  else fail "RBAC" "the controller cannot $verb a VirtualMachineMove"; fi
+done
+if [ "$(kubectl auth can-i patch virtualmachinemoves.banlieue.io -n apps --as="$SA")" = no ]; then
+  pass "and cannot change one"
+else fail "RBAC" "the controller can patch a VirtualMachineMove"; fi
+kubectl delete host hvd1 >/dev/null
+kubectl -n "$BANLIEUE" delete provider hvd1 >/dev/null
+kubectl delete namespace apps --wait=false >/dev/null
+
 echo "--- the CRD refuses a long Host name"
 LONG="h$(printf 'a%.0s' $(seq 1 63))"
 if out="$(host "$LONG" az1 hv04.home.example None 2>&1)"; then

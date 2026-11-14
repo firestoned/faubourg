@@ -749,6 +749,7 @@ fn quantities(pairs: &[(&str, &str)]) -> BTreeMap<String, Quantity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faubourg_api::host::Maintenance;
     use faubourg_api::host::{BootstrapSpec, DEFAULT_SCRIPT_KEY, HostSpec, SecretName};
     use faubourg_api::policy::PinnedScript;
 
@@ -793,6 +794,7 @@ mod tests {
                 }),
                 bootstrap: BootstrapSpec::default(),
                 cordoned: false,
+                maintenance: Maintenance::None,
             },
         );
         h.metadata.uid = Some("8f6b8a52-0000-4000-8000-000000000001".into());

@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use banlieue_api::banlieue::{Provider, ProviderClass};
+use banlieue_api::banlieue::{Provider, ProviderClass, VirtualMachine, VirtualMachineMove};
 use faubourg_api::LABEL_HOST;
-use faubourg_api::host::Host;
+use faubourg_api::host::{Host, HostPhase, Maintenance};
 use faubourg_api::policy::{PROVIDER_CA_SOURCE_KEY, Policy, SCRIPT_SOURCES_KEY, parse_policy};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
@@ -29,6 +29,7 @@ use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::drain::{self, DrainInput};
 use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY, LABEL_REBOOTSTRAP};
 use crate::plan::{NotPersisted, World, plan};
 use crate::provider;
@@ -41,6 +42,9 @@ pub const FIELD_MANAGER: &str = provider::LABELS_MANAGER;
 pub const RESYNC: Duration = Duration::from_secs(600);
 /// Retry a failed reconcile after this long.
 pub const RETRY: Duration = Duration::from_secs(30);
+/// Re-read a draining Host this often: its VMs and moves are banlieue's, and nothing watches
+/// them, so a cluster without the move API never has a watch failing in a loop (ADR-0017).
+pub const DRAIN_RESYNC: Duration = Duration::from_secs(20);
 
 /// Why a reconcile failed. Carries names and API errors, never a spec value.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +67,12 @@ struct Ctx {
     jobs: Api<Job>,
     pods: Api<Pod>,
     providers: Api<Provider>,
+    /// banlieue VMs, every namespace: read only, to find a draining host's (ADR-0017).
+    vms: Api<VirtualMachine>,
+    /// banlieue moves, every namespace: the ones faubourg labelled with a Host (ADR-0017).
+    moves: Api<VirtualMachineMove>,
+    /// For the namespaced move calls.
+    client: Client,
     /// The bootstrap policy's parameters' namespace: read for the one `ConfigMap` (ADR-0013).
     policy: Api<ConfigMap>,
     cfg: Config,
@@ -78,6 +88,9 @@ pub async fn run(client: Client, cfg: Config) {
         jobs: Api::namespaced(client.clone(), &ns),
         pods: Api::namespaced(client.clone(), &ns),
         providers: Api::namespaced(client.clone(), &cfg.bootstrap.provider.namespace),
+        vms: Api::all(client.clone()),
+        moves: Api::all(client.clone()),
+        client: client.clone(),
         policy: Api::namespaced(client.clone(), &cfg.policy.namespace),
         cfg,
     });
@@ -319,7 +332,7 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let pins = pins(ctx.policy.get_opt(&ctx.cfg.policy.name).await?);
     let now = Time(Timestamp::now());
 
-    let p = plan(&World {
+    let world = World {
         host: &host,
         zone: zone.as_ref(),
         jobs: &jobs,
@@ -331,31 +344,26 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         pins: pins.as_ref(),
         fleet: &fleet,
         now: &now,
-    })?;
+        drained: None,
+    };
+    let p = plan(&world)?;
+
+    // The drain (ADR-0017) is planned from the Host's phase this pass, then its condition is
+    // folded into the same status write.
+    let draining = host.spec.maintenance == Maintenance::Drain;
+    let (drain_plan, moves_left) = plan_drain(&ctx, &host, &by_host, &p).await?;
+    let p = if drain_plan.drained.is_some() {
+        plan(&World {
+            drained: drain_plan.drained.as_ref(),
+            ..world
+        })?
+    } else {
+        p
+    };
 
     // The Provider first: banlieue gives it its identity, and only then is a Job created. Its
     // spec before its labels, so the labels' apply never leaves a field without a manager.
-    if let Some(body) = &p.apply_provider_spec {
-        ctx.providers
-            .patch(
-                &name,
-                &PatchParams::apply(provider::SPEC_MANAGER).force(),
-                &Patch::Apply(body),
-            )
-            .await?;
-        if own_provider.is_none() {
-            info!(host = %name, provider = %name, "created the host's Provider");
-        }
-    }
-    if let Some(body) = &p.apply_provider {
-        ctx.providers
-            .patch(
-                &name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Apply(body),
-            )
-            .await?;
-    }
+    apply_provider(&ctx, &name, &p, own_provider.is_some()).await?;
     for job in &p.delete {
         match ctx.jobs.delete(job, &DeleteParams::background()).await {
             Ok(_) => info!(host = %name, job = %job, "deleted stale bootstrap Job"),
@@ -373,6 +381,8 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
             Err(e) => return Err(e.into()),
         }
     }
+    // After the Provider's labels: a drain cordons the host before any VM is asked to leave.
+    apply_drain(&ctx, &name, &drain_plan).await?;
     if p.status_changed {
         let patch = serde_json::json!({
             "apiVersion": format!("{}/{}", faubourg_api::GROUP, faubourg_api::VERSION),
@@ -394,7 +404,109 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
             "phase"
         );
     }
+    if draining || moves_left {
+        return Ok(Action::requeue(DRAIN_RESYNC));
+    }
     Ok(Action::requeue(RESYNC))
+}
+
+/// Applies the host's Provider: its spec before its labels, so the labels' apply never leaves a
+/// field without a manager (ADR-0011, amended).
+async fn apply_provider(
+    ctx: &Ctx,
+    name: &str,
+    p: &crate::plan::Plan,
+    existed: bool,
+) -> Result<(), Error> {
+    if let Some(body) = &p.apply_provider_spec {
+        ctx.providers
+            .patch(
+                name,
+                &PatchParams::apply(provider::SPEC_MANAGER).force(),
+                &Patch::Apply(body),
+            )
+            .await?;
+        if !existed {
+            info!(host = %name, provider = %name, "created the host's Provider");
+        }
+    }
+    if let Some(body) = &p.apply_provider {
+        ctx.providers
+            .patch(
+                name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(body),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Reads a Host's VMs (only while draining) and its moves, and plans the drain. Also says
+/// whether any of its moves exist, so a Host with moves to cancel is re-read soon.
+async fn plan_drain(
+    ctx: &Ctx,
+    host: &Host,
+    by_host: &ListParams,
+    p: &crate::plan::Plan,
+) -> Result<(drain::DrainPlan, bool), Error> {
+    let (moves, moves_served) = list_or_unserved(&ctx.moves, by_host).await?;
+    let (vms, vms_served) = if host.spec.maintenance == Maintenance::Drain {
+        list_or_unserved(&ctx.vms, &ListParams::default()).await?
+    } else {
+        (Vec::new(), true)
+    };
+    let plan = drain::plan(&DrainInput {
+        host,
+        host_ready: p.decision.phase == HostPhase::Ready,
+        provider: p.status.provider_ref.as_deref(),
+        moves_served: moves_served && vms_served,
+        vms: &vms,
+        moves: &moves,
+    });
+    Ok((plan, !moves.is_empty()))
+}
+
+/// Creates and deletes what the drain planned. A move that already exists (409) or is already
+/// gone (404) is what was wanted.
+async fn apply_drain(ctx: &Ctx, host: &str, plan: &drain::DrainPlan) -> Result<(), Error> {
+    for m in &plan.create {
+        let ns = m.namespace().unwrap_or_default();
+        let api: Api<VirtualMachineMove> = Api::namespaced(ctx.client.clone(), &ns);
+        match api.create(&PostParams::default(), m).await {
+            Ok(_) => info!(
+                host = %host,
+                namespace = %ns,
+                vm = %m.spec.vm_ref.name,
+                r#move = %m.name_any(),
+                "asked banlieue to move a VM"
+            ),
+            Err(kube::Error::Api(s)) if s.code == 409 => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    for (ns, mv) in &plan.delete {
+        let api: Api<VirtualMachineMove> = Api::namespaced(ctx.client.clone(), ns);
+        match api.delete(mv, &DeleteParams::default()).await {
+            Ok(_) => info!(host = %host, namespace = %ns, r#move = %mv, "cancelled a move"),
+            Err(kube::Error::Api(s)) if s.code == 404 => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Lists, or reports the kind as not served: a 404 means the CRD is not installed, which the
+/// drain treats as no move API (fail closed, ADR-0017), never as an empty list that is done.
+async fn list_or_unserved<K>(api: &Api<K>, lp: &ListParams) -> Result<(Vec<K>, bool), Error>
+where
+    K: Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    match api.list(lp).await {
+        Ok(list) => Ok((list.items, true)),
+        Err(kube::Error::Api(s)) if s.code == 404 => Ok((Vec::new(), false)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // the signature Controller::run requires

@@ -48,7 +48,8 @@ pub const HOST_SCRIPT_PATH: &str = "/opt/faubourg/install.sh";
     printcolumn = r#"{"name":"Zone","type":"string","jsonPath":".spec.zoneRef"}"#,
     printcolumn = r#"{"name":"Address","type":"string","jsonPath":".spec.address"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Cordoned","type":"boolean","jsonPath":".spec.cordoned"}"#
+    printcolumn = r#"{"name":"Cordoned","type":"boolean","jsonPath":".spec.cordoned"}"#,
+    printcolumn = r#"{"name":"Maintenance","type":"string","jsonPath":".spec.maintenance"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct HostSpec {
@@ -65,6 +66,30 @@ pub struct HostSpec {
     /// Mark the host's `Provider` cordoned (ADR-0003 decision 5).
     #[serde(default)]
     pub cordoned: bool,
+    /// `Drain` asks for the host to be emptied (ADR-0017 decision 2): faubourg cordons its
+    /// `Provider` and asks banlieue to move each of its VMs to another host of the zone. `None`,
+    /// the default, cancels the moves that have not started handing over (decision 5).
+    #[serde(default, skip_serializing_if = "Maintenance::is_none")]
+    pub maintenance: Maintenance,
+}
+
+/// Maintenance asked of a host (ADR-0017 decision 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Maintenance {
+    /// No maintenance.
+    #[default]
+    None,
+    /// Empty the host: cordon it and move its VMs elsewhere in the zone, through banlieue.
+    Drain,
+}
+
+impl Maintenance {
+    /// True for [`Maintenance::None`]; it is not written, so a Host from before ADR-0017 keeps
+    /// its exact shape.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
 }
 
 /// How the bootstrap Job reaches the host (ADR-0006).
@@ -312,7 +337,32 @@ mod tests {
             }),
             bootstrap: BootstrapSpec::default(),
             cordoned: false,
+            maintenance: Maintenance::None,
         }
+    }
+
+    /// ADR-0017 decision 2: no maintenance unless asked, and a Host without the field keeps
+    /// its shape on the wire.
+    #[test]
+    fn maintenance_defaults_to_none_and_is_not_written() {
+        let s: HostSpec =
+            serde_json::from_str(r#"{"zoneRef":"az1","address":"hv01.home.example"}"#).unwrap();
+        assert_eq!(s.maintenance, Maintenance::None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("maintenance").is_none(), "{json}");
+        let d: HostSpec = serde_json::from_str(
+            r#"{"zoneRef":"az1","address":"hv01.home.example","maintenance":"Drain"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.maintenance, Maintenance::Drain);
+        assert_eq!(serde_json::to_value(&d).unwrap()["maintenance"], "Drain");
+        assert!(
+            serde_json::from_str::<HostSpec>(
+                r#"{"zoneRef":"az1","address":"hv01.home.example","maintenance":"Evacuate"}"#
+            )
+            .is_err(),
+            "an unknown maintenance is refused"
+        );
     }
 
     #[test]

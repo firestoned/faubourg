@@ -33,6 +33,7 @@ flowchart LR
     data-asset-ssh-secret["Host SSH Secret"]
     system-banlieue["banlieue"]
     data-asset-provider-cr["banlieue Provider (one per host)"]
+    data-asset-banlieue-vm-crs["banlieue VirtualMachines and VirtualMachineMoves"]
     system-ch-host["Cloud Hypervisor host"]
     data-asset-install-script["Install script source"]
     data-asset-host-install-script["/opt/faubourg/install.sh"]
@@ -76,7 +77,9 @@ flowchart LR
     service-banlieue-ch-provider -->|HTTPS| ecosystem-kube-api
     service-banlieue-ch-provider -->|HTTP| service-cloud-hypervisor
     system-banlieue --> data-asset-provider-cr
+    system-banlieue --> data-asset-banlieue-vm-crs
     service-host-controller --> data-asset-provider-cr
+    service-host-controller -->|HTTPS| data-asset-banlieue-vm-crs
     service-bootstrap-job -->|HTTPS| ecosystem-kube-api
     ecosystem-kube-api -->|HTTPS| ecosystem-ghcr
     actor-platform-operator --> data-asset-install-file

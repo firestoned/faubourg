@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod controller;
+pub mod drain;
 pub mod health;
 pub mod job;
 pub mod leader;

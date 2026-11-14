@@ -58,6 +58,14 @@ rules:
   - apiGroups: ["banlieue.io"]
     resources: ["providerclasses"]
     verbs: ["get"]
+  # Draining a host (ADR-0017 decision 7): find the VMs scheduled on it, in every namespace, and
+  # ask banlieue to move them. Never update, patch or delete a VM; never change a move.
+  - apiGroups: ["banlieue.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["banlieue.io"]
+    resources: ["virtualmachinemoves"]
+    verbs: ["create", "get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

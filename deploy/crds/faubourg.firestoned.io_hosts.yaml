@@ -27,6 +27,9 @@ spec:
     - jsonPath: .spec.cordoned
       name: Cordoned
       type: boolean
+    - jsonPath: .spec.maintenance
+      name: Maintenance
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -80,6 +83,15 @@ spec:
                 default: false
                 description: Mark the host's `Provider` cordoned (ADR-0003 decision 5).
                 type: boolean
+              maintenance:
+                description: |-
+                  `Drain` asks for the host to be emptied (ADR-0017 decision 2): faubourg cordons its
+                  `Provider` and asks banlieue to move each of its VMs to another host of the zone. `None`,
+                  the default, cancels the moves that have not started handing over (decision 5).
+                enum:
+                - None
+                - Drain
+                type: string
               ssh:
                 description: SSH settings. Required unless `bootstrap.method` is `None`.
                 nullable: true

@@ -4,18 +4,24 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Threat Model
 
-> **Status:** Living document. Last full pass **2026-11-13**, against the architecture
+> **Status:** Living document. Last full pass **2026-11-14**, against the architecture
 > defined by **ADR-0001 … ADR-0017** (all Accepted;
 > ADR-0002, ADR-0005, ADR-0007, ADR-0008, ADR-0009, ADR-0010 and ADR-0011 amended, ADR-0009
 > decision 1 superseded by ADR-0014, ADR-0003 amended after banlieue ADR-0124, ADR-0011 amended
 > by ADR-0016 and after banlieue ADR-0126, ADR-0004 and ADR-0015 amended by ADR-0017).
-> Sixteenth pass, for ADR-0017 decision 1 on banlieue v0.5.7: every member host's Provider
+> Seventeenth pass, for ADR-0017 decisions 2 to 7: `Host.spec.maintenance: Drain` cordons the
+> host and creates one banlieue `VirtualMachineMove` at a time for the VMs scheduled on it,
+> reporting `Drained`; clearing it deletes the moves not yet handing over. The controller gains
+> a cluster-wide read of banlieue `VirtualMachine`s and create, list and delete on
+> `VirtualMachineMove`s, and nothing more (no write to a VM, no change to a move). One
+> component, A-14 and A-15, A-9 widened, the TB-1 edge in the diagram, six TB-1 rows and R-15.
+> banlieue's mover is not shipped (its ADR-0127 Stage 1), so today a move is a request nothing
+> acts on. Sixteenth pass, for ADR-0017 decision 1 on banlieue v0.5.7: every member host's Provider
 > carries `banlieue.io/zone`, by the existing field manager, only while the Host's zone exists
 > and is valid. The key is faubourg's statement that the zone's hosts share their L2 segments,
 > on which banlieue will admit VM moves (banlieue ADR-0127; nothing in banlieue acts on it yet).
 > Two TB-1 rows, R-7 widened, R-14 added (a deleted Host's Provider keeps the key); no new
-> component, identity, grant or boundary. The drain and its RBAC on banlieue `VirtualMachine`s
-> and `VirtualMachineMove`s are not built, and their rows come with them (roadmap 03).
+> component, identity, grant or boundary.
 > Fifteenth pass, for ADR-0017: the zone's advisory `HostsMatch` condition, which reads the
 > members' Providers the controller already read. Fourteenth pass: faubourg reads the provider's
 > ServiceAccount name from banlieue instead of deriving it, which closes R-10 and roadmap 01.
@@ -70,6 +76,7 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | Leader election (ADR-0014) | shipped, tested on kind with two controllers | `crates/faubourg-controller/src/{leader,main}.rs`, `deploy/rbac/controller.yaml`, `deploy/controller/deployment.yaml` |
 | Script pinning and the rollout (ADR-0013) | shipped, tested on kind and against OpenSSH | `crates/faubourg-api/src/policy.rs`, `crates/faubourg-controller/src/{plan,job}.rs`, `crates/faubourg-bootstrap/src/config.rs`, `deploy/admission/bootstrap-policy.yaml` |
 | Zone controller (ADR-0015) | shipped, tested on kind | `crates/faubourg-controller/src/{zone,controller}.rs` |
+| Host drain (ADR-0017) | shipped, tested on kind with banlieue's CRDs and its own RBAC; banlieue's mover not shipped | `crates/faubourg-controller/src/{drain,plan,controller,provider}.rs`, `deploy/rbac/controller.yaml`, `scripts/controller-test.sh` |
 
 ## 3. Assets
 
@@ -83,18 +90,20 @@ management path to a host is banlieue's host-resident provider, outbound only.
 | A-6 Each host's banlieue `Provider` labels | banlieue places by them (ADR-0003), and `faubourg.firestoned.io/host` decides which Provider's health is the host's (ADR-0009 decision 5). |
 | A-7 Pinned banlieue digest (the sha256 of the binary, or of banlieue's release tarball) | The script's only proof the binary is genuine. |
 | A-8 Bootstrap policy parameters (`faubourg-bootstrap-policy` in `faubourg-system`) | Name the only image that may mount A-1 and A-2, the only scripts that may run (each A-3 source and key with the sha256 of its content, ADR-0013), and optionally the CA every host trusts for the API server, pinned the same way (ADR-0016). Root-equivalent across the fleet. The controller reads it; nothing in it is secret. |
-| A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace, writes Host status and reads A-8. Cannot read a credential or a script (ADR-0008, ADR-0013), but can run the pinned image with any credential and a pinned script (R-5). |
+| A-9 The controller's ServiceAccount token | Creates and deletes Jobs in the credentials namespace, writes Host status and reads A-8. Since ADR-0017 it also reads every VM (A-14) and creates and deletes moves in any namespace (A-15). Cannot read a credential or a script (ADR-0008, ADR-0013), but can run the pinned image with any credential and a pinned script (R-5). |
 | A-10 The host's provider token | Authenticates as the host Provider's ServiceAccount for a day: reports that Provider's status and serves its machines. Minted by the bootstrap pod, held only by the host (ADR-0011). |
 | A-11 The bootstrap pods' projected token | `faubourg-bootstrap` for 600 seconds: mints A-10 for provider ServiceAccounts of one class. |
 | A-12 The published images and the install file | The bootstrap image is the fleet's root of trust; the install file decides which digest the admission policy admits (ADR-0012). |
 | A-13 The leader Lease (`faubourg-controller` in `faubourg-system`) | Its holder is the one replica that acts. Whoever can write it can stop every replica from acting, or hold it for a replica that does nothing. |
+| A-14 banlieue `VirtualMachine`s, read cluster-wide | Names, namespaces and placements of every VM; specs name Secrets (never their contents). faubourg reads them to find a draining host's VMs and logs only the namespace and name of a VM it asks to move. |
+| A-15 The `VirtualMachineMove`s faubourg creates | Each asks banlieue to move a running guest, memory and disk, to another host of its zone. One too many pauses a guest; one cancelled at the wrong time would be a split brain, which banlieue prevents by refusing to cancel after `HandingOver`. |
 
 ## 4. Actors
 
 | Actor | Trust |
 | --- | --- |
 | Platform administrator | Trusted. Writes the admission policy, its parameters (A-8), the RBAC and the Secrets, and pins each script change (ADR-0013). |
-| Platform operator | Trusted for inventory. Writes Host and AvailabilityZone CRs. |
+| Platform operator | Trusted for inventory. Writes Host and AvailabilityZone CRs; `maintenance: Drain` on a Host asks banlieue to move every VM on it. |
 | Script maintainer | Trusted for A-3 only. Writes ConfigMaps in the credentials namespace; cannot change which image runs, which objects may be a script, or which content runs: A-8, which pins it, lives elsewhere. |
 | The Host controller | Not trusted with credentials. A compromise must not yield a key (ADR-0008). |
 | banlieue administrator | Trusted by banlieue. Writes Providers and their labels in banlieue's namespace, so can attach a Provider to a Host by label (R-7). |
@@ -114,7 +123,7 @@ flowchart LR
         job[Bootstrap Job: faubourg-bootstrap, no shell]
     end
     kube -.->|evaluates every Job and Pod in the credentials namespace| vap{{Bootstrap admission policy}}
-    ctl -->|TB-1: Hosts, zones, its Jobs, Providers, status| kube
+    ctl -->|TB-1: Hosts, zones, its Jobs, Providers, status, VMs read, moves| kube
     job -->|TB-2 mounts| kube
     job -->|TB-6 TokenRequest, bounded by policy| kube
     job -->|TB-3 SSH: host key checked before auth, constant commands| host
@@ -130,7 +139,8 @@ flowchart LR
 ```
 
 - **TB-1** controllers → Kubernetes API: Hosts, zones, the Jobs and pods in the credentials
-  namespace, and Providers in banlieue's namespace.
+  namespace, Providers in banlieue's namespace, and (ADR-0017) banlieue VMs, read, and the moves
+  it creates, in every namespace.
 - **TB-2** Job pod → its mounted Secret(s) and script source.
 - **TB-3** Job → host sshd (placement and run).
 - **TB-4** install script → artifact repository (curl).
@@ -163,6 +173,12 @@ flowchart LR
 | A zone's `providerLabels` cordons every member through banlieue, outside any Host's `cordoned` | T, D | `banlieue.io/unschedulable` is reserved too (`zone.rs`, `provider_labels_may_not_cordon_a_zone_through_banlieue`). faubourg's copy of the key is checked against banlieue-api's (`provider.rs`, `faubourgs_copy_of_banlieues_cordon_label_matches_banlieue`). |
 | A zone's `providerLabels` puts its members in **another banlieue zone**, so banlieue would move VMs between hosts that do not share their L2 segments and a moved guest's addresses break (ADR-0017 decision 1) | T, D | `banlieue.io/zone` is reserved (`faubourg-api` `zone.rs`, `provider_labels_may_not_put_a_zone_in_another_banlieue_zone`); faubourg's copy of the key is checked against banlieue-api's (`provider.rs`, `faubourgs_copy_of_banlieues_zone_label_matches_banlieue`). |
 | `banlieue.io/zone` is stated for a Host whose zone is **missing, refused (`Shared`) or another zone**, so banlieue treats an unvetted host as a zone member | T | Fail closed: the key is written only when the zone object is the one the Host names and passes validation, and server-side apply removes it otherwise (`provider.rs`, `labels`; `banlieues_zone_label_needs_a_zone_that_exists_and_is_valid`); `controller-test` checks it set, following a Host to another zone, and gone for a `Shared` and a missing zone. |
+| A compromised controller asks banlieue to **move any VM** in the cluster, or many at once | T, D | Bounded, not prevented: the controller can create and delete moves but never write a VM (`deploy/rbac/controller.yaml`; `controller-test` checks `patch`, `update` and `delete` on a VM and `patch` on a move are refused). A move names no target, so where a VM goes is banlieue's, inside the VM's zone. R-15. |
+| The drain **deletes a VM**, or retries a refused move in a loop | D | It never does either: no `delete` on VMs (RBAC, `controller-test`); a `Rejected` or `Failed` move blocks its VM and is not asked again (`drain.rs`, `a_rejected_or_failed_move_blocks_its_vm_and_never_retries`; `controller-test`). |
+| A drain reports done, or proceeds, when the cluster serves **no move API** | T | Fails closed: a 404 listing VMs or moves is "not served", never "empty" (`controller.rs`, `list_or_unserved`), and the drain creates nothing and reports `MovesUnsupported` (`drain.rs`, `no_move_api_creates_nothing_and_says_so`). |
+| Ending a drain **cancels a move mid-handover**, leaving the guest on both hosts or neither | T, D | Only `Pending`, `Preparing` and `Copying` moves are deleted, by banlieue-api's `MovePhase::is_cancellable` (`drain.rs`, `clearing_maintenance_cancels_only_moves_before_handover`; `controller-test`). |
+| A drain floods banlieue: every VM of a host moving at once | D | One move in flight per host (`MAX_MOVES_PER_HOST`; `a_drain_asks_for_one_move_at_a_time`, `a_move_in_flight_holds_the_next_one`; `controller-test` "one move at a time"). A host that is not `Ready` gets none (`a_host_that_is_not_ready_is_not_drained`). |
+| Someone's own move, carrying the Host label, is **cancelled** when faubourg ends a drain | T | Bounded: the label is under faubourg's prefix and faubourg deletes only moves that carry it; whoever can label a move can delete it anyway. |
 | An unsupported storage mode is silently treated as Local | T | `Shared` is refused (`zone.rs`, `shared_storage_is_refused_in_v1`). |
 | A Host is reported `Ready` (and its zone counted ready) when its provider is not running | S, T | The phase machine reaches `Ready` only from `ProviderHealth::Healthy` (`crates/faubourg-controller/src/phase.rs`, `nothing_reaches_ready_without_a_healthy_provider`). Healthy needs `Ready=True` for the `Provider`'s current generation **and** an `Alive` heartbeat; a missing, `Unknown`, stale-generation or not-yet-evaluated signal is unhealthy (`health.rs`). A refused spec is `Failed` whatever the cluster says (`a_refused_spec_fails_whatever_the_cluster_says`). |
 | A Job someone else made, with the Host's labels, is taken as the Host's (a forged `Complete` record, or a squatter) | S, T | Only a Job whose controller `ownerReference` carries the Host's UID counts (`job.rs`, `owned_by`, `only_the_hosts_own_jobs_are_its_jobs`); a recreated Host does not inherit the old one's Jobs (`plan.rs`, `a_job_of_a_recreated_host_is_not_its_own`). |
@@ -318,6 +334,7 @@ flowchart LR
 | R-12 | Whoever controls this repository's release workflow or `main` branch can publish a signed image (ADR-0012 consequences). Mitigated: signed commits, DCO, pinned actions, least-privilege jobs, release-only identity in verification, digest pinning at admission. | A second signer (a maintainer's key, or a reproducible build checked by another party). |
 | R-13 | One install script serves every host, so a host's own banlieue settings (a VMM build, a guest budget) live in that script's `INSTALL_FLAGS`, and a run with flags that do not fit a host reverts it. Bounded by banlieue's installer: it changes only what differs and keeps the host config but `[vmm]`; guests already running keep their VMM. | Per-host install settings are designed, from the script source and never from a CR field (ADR-0005). |
 | R-14 | A deleted Host's Provider keeps `banlieue.io/zone` (and its cordon labels): faubourg never deletes or rewrites it (ADR-0011 decision 4, ADR-0009 decision 13, no finalizer), so banlieue may still admit moves to or from that host while its Provider stays registered. The host still shares the zone's segments; what is lost is faubourg's management of it. Mitigated: deleting the Provider, the step for removing a host, removes the key with it (`docs/concepts.md`). | faubourg manages a host's removal (drain, then release the Provider), or banlieue moves start acting on the key (banlieue ADR-0127 Stage 1). |
+| R-15 | The controller can create a `VirtualMachineMove` for any VM in any namespace, since a host serves every namespace (ADR-0017 decision 7). A compromised controller can therefore ask banlieue to move any VM; it cannot choose the destination or write the VM, and banlieue admits a move only inside the VM's zone, on matching hosts, within the VM's own policy (banlieue ADR-0127 Decision 3, enforced by banlieue's mover, which is not shipped yet: until then nothing acts on a move). The cost is a guest paused for the move. | banlieue's mover ships (re-walk this row against its admission), or a namespace can opt out of moves. |
 | R-6 | Whoever administers the admission policy, its binding or A-8 (cluster-admin) can switch the protection off. | Never: that role is the root of trust for the cluster. |
 
 ## 9. Assumptions and out of scope
@@ -361,3 +378,4 @@ flowchart LR
 | 2026-11-09 | 0001 … 0016 | Fourteenth pass: the ADR-0011 amendment after banlieue ADR-0126. faubourg mints for the ServiceAccount name banlieue publishes and never derives one; **R-10 closed**, and with it roadmap 01. No new boundary, actor or permission; the controller already read Providers. |
 | 2026-11-11 | 0001 … 0017 | Fifteenth pass: ADR-0017 (host drain through banlieue VM moves, Accepted), ADR-0004 decision 3 and ADR-0015 amended. Implemented so far: the zone's advisory `HostsMatch` from members' `raw.vmm` and `raw.cpuModel`; two TB-1 rows (a report from the wrong Provider; what the condition discloses). No new component, identity, permission or boundary yet: the controller already read Providers, and §5's diagram is unchanged. The drain's rows (asking banlieue to move any VM on a managed host, cluster-wide read of VMs, the zone label as a network promise) are written when it is built, not before. |
 | 2026-11-13 | 0001 … 0017 | Sixteenth pass: ADR-0017 decision 1 on banlieue v0.5.7 (`banlieue-api` `=0.5.7`). Member Providers carry `banlieue.io/zone` while the Host's zone exists and is valid. Two TB-1 rows (a zone naming another banlieue zone, the key stated for an unvetted host), R-7 widened (hand-set keys), R-14 added (a deleted Host's Provider keeps the key). No new component, identity, grant or boundary; diagram unchanged. |
+| 2026-11-14 | 0001 … 0017 | Seventeenth pass: ADR-0017 decisions 2 to 7, the drain. `Host.spec.maintenance`, the pure planner (`drain.rs`), `Drained`, cancelling on clear, and the RBAC: read VMs cluster-wide, create, list and delete moves. One component, A-14, A-15, A-9 and the operator widened, the TB-1 edge and its text, six TB-1 rows, R-15. banlieue's mover is not shipped, so a move is a request nothing acts on yet. |
