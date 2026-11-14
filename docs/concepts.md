@@ -149,6 +149,19 @@ and `banlieue.io/unschedulable: "true"`. banlieue's scheduler keeps every new VM
 with the second label (banlieue ADR-0124, banlieue v0.5.3 and later), and leaves the VMs already
 there where they are. Uncordoning removes both labels.
 
+## banlieue's zone key
+
+Every member host's `Provider` also carries `banlieue.io/zone: <zone name>` (ADR-0017 decision 1),
+set by the same field manager as faubourg's own zone label. It is faubourg's statement to banlieue
+that the zone's hosts share the L2 segments behind their network classes, so banlieue may move a
+running VM between them and its addresses stay valid (banlieue ADR-0127, banlieue v0.5.7 and later
+for the key). faubourg sets it only while the Host's zone exists and is valid: a Host naming a
+missing zone, or a `Shared` one, carries none, and moving a Host to another zone moves the key with
+it. A zone's `providerLabels` may not set it.
+
+Deleting a Host does not remove it: faubourg never deletes or rewrites a deleted Host's `Provider`
+(ADR-0011 decision 4), which keeps this key, like the cordon labels, until the Provider is removed.
+
 ## Placing VMs in a zone
 
 A VM lands in a zone through its `providerSelector`, which banlieue's scheduler matches against

@@ -375,6 +375,10 @@ eventually "a Shared zone is refused (ADR-0004)" 30 zone_is zh-shared False Stor
 host hv13 zh-a hv13.home.example None
 provider hv13 hv13
 eventually "a zone whose host is Ready is Ready" 60 zone_is zh-a True HostsReady 1 1 0
+banlieue_zone_is() { # provider, expected banlieue.io/zone value ("" for none)
+  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.labels.banlieue\.io/zone}')" = "$2" ]
+}
+eventually "a member host's Provider carries banlieue's zone key (ADR-0017)" 30 banlieue_zone_is hv13 zh-a
 match_is() { # zone, HostsMatch status, reason
   kubectl get availabilityzone "$1" -o json | jq -e --arg s "$2" --arg r "$3" \
     '.status.conditions | any(.type == "HostsMatch" and .status == $s and .reason == $r)' >/dev/null
@@ -389,6 +393,11 @@ eventually "a zone whose only Ready host is cordoned is not" 30 zone_is zh-a Fal
 kubectl patch host hv13 --type=merge -p '{"spec": {"zoneRef": "zh-b", "cordoned": false}}' >/dev/null
 eventually "a host moving out empties its old zone" 30 zone_is zh-a False NoHosts 0 0 0
 eventually "and counts in its new one" 30 zone_is zh-b True HostsReady 1 1 0
+eventually "and banlieue's zone key follows it" 30 banlieue_zone_is hv13 zh-b
+kubectl patch host hv13 --type=merge -p '{"spec": {"zoneRef": "zh-shared"}}' >/dev/null
+eventually "a refused zone states no banlieue zone" 30 banlieue_zone_is hv13 ""
+kubectl patch host hv13 --type=merge -p '{"spec": {"zoneRef": "zh-gone"}}' >/dev/null
+eventually "nor does a zone that does not exist" 30 banlieue_zone_is hv13 ""
 if kubectl get availabilityzone zh-a -o json --show-managed-fields | jq -e '
    .metadata.managedFields | map(select(.manager == "faubourg.firestoned.io/zone-controller"))
    | all(.subresource == "status")' >/dev/null; then

@@ -8,8 +8,9 @@ each of its VMs to another host of the same zone. faubourg decides when and whic
 decides where and performs the move (banlieue ADR-0127, its roadmap 14). ADD cycle per item.
 
 **Status: in progress.** ADR-0017 Accepted 2026-11-11 (decisions 8 to 10 from the open
-questions below); banlieue ADR-0127 is Proposed (2026-11-10). `HostsMatch` is done; everything
-else waits for banlieue's `VirtualMachineMove` and `banlieue.io/zone` in `banlieue-api`.
+questions below); banlieue ADR-0127 Accepted 2026-11-11, its API released in banlieue v0.5.7
+(`VirtualMachineMove`, `banlieue.io/zone`), with no banlieue controller acting on a move yet.
+`HostsMatch` and the zone key are done; the drain is next.
 
 ## What a drain can move, by banlieue stage
 
@@ -30,7 +31,9 @@ block the drain.
 
 ## Open questions
 
-- [ ] **Which machine a moved VM uses** (banlieue ADR-0127, a blocker for its Stage 1).
+- [x] **Which machine a moved VM uses** (banlieue ADR-0127, a blocker for its Stage 1).
+  Settled in banlieue ADR-0127 Decision 4 (2026-11-11): the VM finds its machine through
+  `status.infrastructureRef`, switched with `status.scheduled` at commit.
   banlieue's VM reconciler addresses a VM's infrastructure machine by the VM's own name
   (`virtualmachine.rs`, `delete_existing_infra(.., &vm.name_any())`; the builders and the
   status mirror likewise), while ADR-0127 names the destination machine `<vm>-<move id>`.
@@ -53,11 +56,14 @@ block the drain.
 - [x] CALM for `HostsMatch`: the zone controller reads its members' Providers
 - [ ] CALM: faubourg's controller gains the relationship to banlieue `VirtualMachine`s (read)
   and `VirtualMachineMove`s (create, read, delete); `make calm-validate`
-- [ ] `banlieue-api` bumped to the release that exports `LABEL_ZONE` and the
-  `VirtualMachineMove` type
-- [ ] Decision 1: `banlieue.io/zone: <zone>` on each member host's Provider, by the existing
-  field manager and server-side apply, removed when the Host leaves the zone; reserved in
-  zones beside `banlieue.io/unschedulable`; `make controller-test` checks set and removal
+- [x] `banlieue-api` bumped to the release that exports `LABEL_ZONE` and the
+  `VirtualMachineMove` type: `=0.5.7`; `zone.rs` takes `RAW_VMM` and `RAW_CPU_MODEL` from it
+- [x] Decision 1: `banlieue.io/zone: <zone>` on each member host's Provider, by the existing
+  field manager and server-side apply, only while the Host's zone exists and is valid, so it
+  moves with the Host and goes when the zone is missing or refused; reserved in zones beside
+  `banlieue.io/unschedulable` (`provider.rs`, `labels`; `faubourg-api` `zone.rs`);
+  `make controller-test` checks set, follow and removal. A deleted Host's Provider keeps it
+  (ADR-0011 decision 4; threat model)
 - [x] Decision 9: zone condition `HostsMatch` from members' `raw.vmm` and `raw.cpuModel`
   (`HostsDiffer`, `HostsUnreported`), advisory, not part of `Ready`; the zone controller wakes on
   a member Provider's change (`zone.rs`; `controller-test`); docs in `docs/concepts.md`;

@@ -44,7 +44,8 @@ pub struct AvailabilityZoneSpec {
     #[serde(default)]
     pub storage: ZoneStorage,
     /// Labels copied onto every member host's banlieue `Provider`, and so onto its failure
-    /// domain. Keys under `faubourg.firestoned.io/`, and `banlieue.io/unschedulable`, are reserved.
+    /// domain. Keys under `faubourg.firestoned.io/`, `banlieue.io/unschedulable` and `banlieue.io/zone` are
+    /// reserved.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_labels: BTreeMap<String, String>,
 }
@@ -103,14 +104,19 @@ impl AvailabilityZoneSpec {
         for (k, v) in &self.provider_labels {
             let field = format!("spec.providerLabels[{k}]");
             // A zone cannot cordon its hosts behind faubourg's back: banlieue's cordon
-            // label is faubourg's, set from a Host's `cordoned` (ADR-0003, amended).
-            if k.starts_with(LABEL_PREFIX) || k == crate::LABEL_BANLIEUE_UNSCHEDULABLE {
+            // label is faubourg's, set from a Host's `cordoned` (ADR-0003, amended). Nor can it
+            // put its hosts in another banlieue zone (ADR-0017 decision 1).
+            if k.starts_with(LABEL_PREFIX)
+                || k == crate::LABEL_BANLIEUE_UNSCHEDULABLE
+                || k == crate::LABEL_BANLIEUE_ZONE
+            {
                 errs.push(
                     &field,
                     REASON_RESERVED_LABEL,
                     format!(
-                        "keys under {LABEL_PREFIX} and {} are owned by faubourg",
-                        crate::LABEL_BANLIEUE_UNSCHEDULABLE
+                        "keys under {LABEL_PREFIX}, {} and {} are owned by faubourg",
+                        crate::LABEL_BANLIEUE_UNSCHEDULABLE,
+                        crate::LABEL_BANLIEUE_ZONE
                     ),
                 );
             } else if !is_label_key(k) || !is_label_value(v) {
@@ -180,6 +186,19 @@ mod tests {
         s.provider_labels.insert(
             crate::LABEL_BANLIEUE_UNSCHEDULABLE.to_string(),
             "true".to_string(),
+        );
+        assert_eq!(
+            s.validate().unwrap_err().reasons(),
+            vec![REASON_RESERVED_LABEL]
+        );
+    }
+
+    #[test]
+    fn provider_labels_may_not_put_a_zone_in_another_banlieue_zone() {
+        let mut s = spec(StorageMode::Local);
+        s.provider_labels.insert(
+            crate::LABEL_BANLIEUE_ZONE.to_string(),
+            "elsewhere".to_string(),
         );
         assert_eq!(
             s.validate().unwrap_err().reasons(),
