@@ -137,7 +137,7 @@ disks live on its host, so:
 - losing a host loses the VMs on it, and recovery means recreating them from a pool or image
   on a healthy host, which banlieue already does for pool members;
 - a VM can move to another host of its zone only by copy, while both hosts are up, done by
-  banlieue when a host is drained (ADR-0017 and banlieue ADR-0127, planned: roadmap 03).
+  banlieue when a host is drained (ADR-0017 and banlieue ADR-0127; see Draining a host).
 
 `Shared` is in the schema so the API will not break when it arrives, but faubourg refuses it
 today: the zone is `Ready=False` with reason `StorageModeUnsupported`.
@@ -161,6 +161,39 @@ it. A zone's `providerLabels` may not set it.
 
 Deleting a Host does not remove it: faubourg never deletes or rewrites a deleted Host's `Provider`
 (ADR-0011 decision 4), which keeps this key, like the cordon labels, until the Provider is removed.
+
+## Draining a host
+
+`spec.maintenance: Drain` on a Host asks for it to be emptied (ADR-0017). faubourg cordons its
+`Provider` first, so nothing new lands there, then asks banlieue to move each VM scheduled on it
+to another host of the zone, by creating a `VirtualMachineMove` in the VM's namespace:
+
+- **No target.** banlieue picks the destination: of the zone's hosts that can take the VM, the one
+  with the most free memory left after the move.
+- **One at a time** per host (`MAX_MOVES_PER_HOST`), in namespace and name order. Each move is
+  labelled `faubourg.firestoned.io/host: <host>`.
+- **Never forced.** A move banlieue rejects (a VM with `migrationPolicy: Never`, one with a vTPM
+  until banlieue's Stage 2, no host that fits) or that fails is reported and not asked again;
+  faubourg never deletes a VM. Deleting that move lets the drain ask once more.
+
+The Host's `Drained` condition says where it stands:
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| `True` | `Drained` | no VM is scheduled on the host |
+| `False` | `Draining` | moves are in flight, or waiting for the one slot |
+| `False` | `MovesBlocked` | banlieue would not move the VMs named in the message, with its reason |
+| `False` | `MovesUnsupported` | the cluster serves no `VirtualMachineMove` (banlieue older than v0.5.7) |
+| `False` | `HostNotReady` | the host's provider is not running; a move needs both hosts alive |
+| `False` | `ProviderUnknown` | the host has no single Provider, so its VMs cannot be found |
+
+Setting `maintenance` back to `None` deletes the drain's moves that are still `Pending`,
+`Preparing` or `Copying` (banlieue cancels those), leaves the rest to finish, removes `Drained`,
+and lifts the drain's cordon (a `cordoned: true` stays). A host that is down is not drained:
+its VMs are lost as before, since there is no fencing (ADR-0004).
+
+> banlieue v0.5.7 serves the `VirtualMachineMove` API, but its controller that performs moves
+> ships with ADR-0127 Stage 1. Until then a drain creates the first move and waits on it.
 
 ## Placing VMs in a zone
 

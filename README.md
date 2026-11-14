@@ -40,7 +40,7 @@ failure domains. faubourg adds what banlieue has no object for
 
 v1 zones use **local storage only**: no shared disks, no fencing
 ([ADR-0004](docs/adr/0004-v1-local-storage-only.md)). Draining a host by moving its VMs to
-another host of the zone, done by banlieue, is planned
+another host of the zone, done by banlieue, is built on faubourg's side and waits for banlieue's mover
 ([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md), [roadmap 03](.github/community/03-host-drain-and-vm-moves.md)).
 
 ```yaml
@@ -77,7 +77,7 @@ exists; read its accepted risks before deploying, and expect the API to change b
 | [Signed images and the install file](docs/guides/installing.md) ([ADR-0012](docs/adr/0012-images-signed-and-published-by-digest.md)) | implemented; v0.1.0 and v0.1.1 released and verified |
 | A run against a real hypervisor | done: one host adopted, then bootstrapped from nothing ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller ([ADR-0015](docs/adr/0015-zone-controller.md)) and cordon | implemented: zone health, and a cordon banlieue enforces (banlieue v0.5.3 and later), tested on kind ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
-| Host drain through banlieue VM moves ([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md)) | in progress: a zone reports `HostsMatch` (same VMM and CPU model on every host), and each member host's `Provider` carries `banlieue.io/zone`; the drain itself is next, against banlieue v0.5.7's `VirtualMachineMove` ([roadmap 03](.github/community/03-host-drain-and-vm-moves.md)) |
+| Host drain through banlieue VM moves ([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md)) | implemented on faubourg's side, tested on kind: `maintenance: Drain` cordons the host and asks banlieue to move its VMs one at a time, reporting `Drained`; a zone reports `HostsMatch`; member Providers carry `banlieue.io/zone`. Moves happen once banlieue's mover ships (its ADR-0127 Stage 1) ([roadmap 03](.github/community/03-host-drain-and-vm-moves.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
 The status board is [`ROADMAPS.md`](ROADMAPS.md).

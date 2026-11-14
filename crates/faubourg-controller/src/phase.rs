@@ -265,6 +265,7 @@ fn decision(phase: HostPhase, reason: &'static str, message: impl Into<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faubourg_api::host::Maintenance;
     use faubourg_api::host::{BootstrapSpec, SecretName, SshSpec};
 
     const ALL_PHASES: [Option<HostPhase>; 6] = [
@@ -317,6 +318,7 @@ mod tests {
             }),
             bootstrap: BootstrapSpec::default(),
             cordoned: false,
+            maintenance: Maintenance::None,
         }
     }
 

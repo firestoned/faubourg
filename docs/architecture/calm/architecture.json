@@ -23,7 +23,7 @@
       "unique-id": "service-host-controller",
       "node-type": "service",
       "name": "Host controller",
-      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), and writes status by server-side apply. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token."
+      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), writes status by server-side apply, and drains a Host whose spec.maintenance is Drain: it cordons the Provider, then asks banlieue to move the Host's VMs one at a time by creating VirtualMachineMoves with no target, reports Drained (MovesBlocked naming the VMs banlieue would not move), and on maintenance None deletes its moves that have not reached HandingOver (ADR-0017). It never updates or deletes a VirtualMachine. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token."
     },
     {
       "unique-id": "service-zone-controller",
@@ -84,6 +84,12 @@
       "node-type": "data-asset",
       "name": "banlieue Provider (one per host)",
       "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager, and banlieue's zone key banlieue.io/zone while the Host's zone exists and is valid (ADR-0017 decision 1: the statement that lets banlieue move a VM between the zone's hosts, banlieue ADR-0127); its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
+    },
+    {
+      "unique-id": "data-asset-banlieue-vm-crs",
+      "node-type": "data-asset",
+      "name": "banlieue VirtualMachines and VirtualMachineMoves",
+      "description": "banlieue's namespaced VirtualMachine (status.scheduled names the Provider a VM runs on) and VirtualMachineMove (a request that banlieue move one running VM to another host of its zone; banlieue ADR-0127, API from banlieue v0.5.7). faubourg reads VMs cluster-wide and creates, lists and deletes the moves it labelled with a Host's name; banlieue admits, ranks the destination and performs each move."
     },
     {
       "unique-id": "system-ch-host",
@@ -396,6 +402,20 @@
       }
     },
     {
+      "unique-id": "rel-banlieue-performs-moves",
+      "description": "banlieue admits each VirtualMachineMove (same zone, matching VMM and CPU model, the move feature, the VM's own policy and placement), picks the destination with the most free memory after the move, and moves the VM through the two hosts' providers (banlieue ADR-0127; its controller ships with Stage 1).",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "system-banlieue"
+          },
+          "destination": {
+            "node": "data-asset-banlieue-vm-crs"
+          }
+        }
+      }
+    },
+    {
       "unique-id": "rel-host-controller-provider-cr",
       "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
       "relationship-type": {
@@ -408,6 +428,21 @@
           }
         }
       }
+    },
+    {
+      "unique-id": "rel-host-controller-vm-moves",
+      "description": "Draining a Host (ADR-0017): lists banlieue VirtualMachines in every namespace to find those scheduled on the Host's Provider (get, list, watch; no update or patch), and creates one VirtualMachineMove per VM in the VM's namespace, labelled with the Host's name and with no target, at most MAX_MOVES_PER_HOST in flight; deletes its moves still Pending, Preparing or Copying when maintenance is cleared (create, get, list, watch, delete). A missing VirtualMachineMove CRD fails closed: Drained=False, MovesUnsupported, nothing created.",
+      "relationship-type": {
+        "connects": {
+          "source": {
+            "node": "service-host-controller"
+          },
+          "destination": {
+            "node": "data-asset-banlieue-vm-crs"
+          }
+        }
+      },
+      "protocol": "HTTPS"
     },
     {
       "unique-id": "rel-job-token-request",

@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment, WorkloadMode};
-use faubourg_api::host::{BootstrapMethod, Host};
+use faubourg_api::host::{BootstrapMethod, Host, Maintenance};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
 use faubourg_api::{
@@ -56,7 +56,8 @@ pub fn labels(host: &Host, zone: Option<&AvailabilityZone>) -> BTreeMap<String, 
     if let Some(name) = host.metadata.name.as_deref() {
         l.insert(LABEL_HOST.into(), name.into());
     }
-    if host.spec.cordoned {
+    // A drain implies the cordon (ADR-0017 decision 2).
+    if host.spec.cordoned || host.spec.maintenance == Maintenance::Drain {
         l.insert(LABEL_CORDONED.into(), "true".into());
         // banlieue's scheduler keeps every new VM off it (banlieue ADR-0124).
         l.insert(LABEL_BANLIEUE_UNSCHEDULABLE.into(), "true".into());
@@ -180,6 +181,7 @@ mod tests {
                     script_ref: None,
                 },
                 cordoned: false,
+                maintenance: Maintenance::None,
             },
         )
     }
@@ -314,6 +316,23 @@ mod tests {
                 assert!(!labels(&h, None).contains_key(key), "{method:?} {key}");
             }
         }
+    }
+
+    /// ADR-0017 decision 2: a drain implies the cordon, so nothing new lands on the host while
+    /// its VMs leave, whatever `cordoned` says; ending the drain leaves the cordon to `cordoned`.
+    #[test]
+    fn a_draining_host_is_cordoned() {
+        let mut h = host(BootstrapMethod::Script);
+        h.spec.maintenance = Maintenance::Drain;
+        for key in [LABEL_CORDONED, LABEL_BANLIEUE_UNSCHEDULABLE] {
+            assert_eq!(
+                labels(&h, None).get(key).map(String::as_str),
+                Some("true"),
+                "{key}"
+            );
+        }
+        h.spec.maintenance = Maintenance::None;
+        assert!(!labels(&h, None).contains_key(LABEL_BANLIEUE_UNSCHEDULABLE));
     }
 
     #[test]

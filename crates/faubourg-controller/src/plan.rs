@@ -24,6 +24,7 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
+use crate::drain::{CONDITION_DRAINED, Drained};
 use crate::health::ProviderHealth;
 use crate::job::{
     BootstrapConfig, JobError, LABEL_REBOOTSTRAP, bootstrap_job, job_generation, job_inputs,
@@ -80,6 +81,8 @@ pub struct World<'a> {
     pub fleet: &'a [Job],
     /// The time to stamp on a condition that changes.
     pub now: &'a Time,
+    /// The drain's `Drained` condition, while the Host is draining (ADR-0017 decision 4).
+    pub drained: Option<&'a Drained>,
 }
 
 /// What one reconcile does.
@@ -199,6 +202,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
             accepted_host_key,
             bootstrapped_inputs,
             bootstrap,
+            drained: w.drained.cloned(),
         },
         w.now,
     );
@@ -464,6 +468,8 @@ struct Recorded {
     bootstrapped_inputs: Option<String>,
     /// `BootstrapCurrent`, for a bootstrapped Host: status, reason, message.
     bootstrap: Option<(bool, &'static str, &'static str)>,
+    /// `Drained`, while the Host is draining.
+    drained: Option<Drained>,
 }
 
 /// The status a decision makes. Fields the reconciler does not decide are carried over.
@@ -490,6 +496,17 @@ fn status(
             current,
             reason,
             message,
+            generation,
+            now,
+        ));
+    }
+    if let Some(drained) = &r.drained {
+        conditions.push(condition(
+            previous,
+            CONDITION_DRAINED,
+            drained.status,
+            drained.reason,
+            &drained.message,
             generation,
             now,
         ));
@@ -542,6 +559,7 @@ mod tests {
         REASON_JOB_FAILED, REASON_JOB_RUNNING, REASON_PROVIDER_AMBIGUOUS, REASON_PROVIDER_HEALTHY,
         REASON_SCRIPT_DRIFT, REASON_ZONE_NOT_FOUND, REASON_ZONE_UNSUPPORTED,
     };
+    use faubourg_api::host::Maintenance;
     use faubourg_api::host::{
         BootstrapMethod, BootstrapSpec, DEFAULT_SCRIPT_KEY, HostKeyPolicy, HostSpec, ScriptRef,
         ScriptSourceKind, SecretName, SshSpec,
@@ -600,6 +618,7 @@ mod tests {
                 }),
                 bootstrap: BootstrapSpec::default(),
                 cordoned: false,
+                maintenance: Maintenance::None,
             },
         );
         h.metadata.uid = Some(UID.into());
@@ -686,6 +705,7 @@ mod tests {
         pins: Option<Policy>,
         fleet: Vec<Job>,
         now: Time,
+        drained: Option<Drained>,
     }
 
     impl Fixture {
@@ -705,6 +725,7 @@ mod tests {
                 }),
                 fleet: vec![],
                 now: at(1_000),
+                drained: None,
             }
         }
 
@@ -721,6 +742,7 @@ mod tests {
                 pins: self.pins.as_ref(),
                 fleet: &self.fleet,
                 now: &self.now,
+                drained: self.drained.as_ref(),
             })
             .unwrap()
         }
@@ -995,6 +1017,40 @@ mod tests {
         assert_eq!(ready.status.conditions[0].last_transition_time, at(3_000));
     }
 
+    /// ADR-0017 decision 4: a draining Host carries `Drained` beside `Ready`, and loses it when
+    /// the drain ends.
+    #[test]
+    fn a_draining_host_reports_drained_beside_ready() {
+        let mut f = Fixture::new(host(1));
+        f.drained = Some(Drained {
+            status: false,
+            reason: crate::drain::REASON_MOVES_BLOCKED,
+            message: "banlieue will not move apps/web-0 (VTPMNotMovable)".into(),
+        });
+        let p = f.plan();
+        let d = p
+            .status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == CONDITION_DRAINED)
+            .expect("Drained");
+        assert_eq!(d.status, "False");
+        assert_eq!(d.reason, crate::drain::REASON_MOVES_BLOCKED);
+        assert!(d.message.contains("apps/web-0"));
+        assert_eq!(
+            p.status.conditions[0].type_, CONDITION_READY,
+            "Ready stays first"
+        );
+        f.drained = None;
+        assert!(
+            !f.plan()
+                .status
+                .conditions
+                .iter()
+                .any(|c| c.type_ == CONDITION_DRAINED)
+        );
+    }
+
     #[test]
     fn status_records_the_generation_and_keeps_the_accepted_host_key() {
         let mut f = Fixture::new(host(5));
@@ -1032,6 +1088,7 @@ mod tests {
             pins: f.pins.as_ref(),
             fleet: &f.fleet,
             now: &f.now,
+            drained: None,
         });
         assert_eq!(r, Err(NotPersisted("uid")));
     }

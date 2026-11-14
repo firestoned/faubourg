@@ -309,6 +309,7 @@ mod tests {
                     script_ref: None,
                 },
                 cordoned,
+                maintenance: faubourg_api::host::Maintenance::None,
             },
         );
         h.status = Some(HostStatus {

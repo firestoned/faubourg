@@ -10,7 +10,8 @@ decides where and performs the move (banlieue ADR-0127, its roadmap 14). ADD cyc
 **Status: in progress.** ADR-0017 Accepted 2026-11-11 (decisions 8 to 10 from the open
 questions below); banlieue ADR-0127 Accepted 2026-11-11, its API released in banlieue v0.5.7
 (`VirtualMachineMove`, `banlieue.io/zone`), with no banlieue controller acting on a move yet.
-`HostsMatch` and the zone key are done; the drain is next.
+`HostsMatch`, the zone key and faubourg's side of the drain are done; a drain moves VMs once
+banlieue's mover ships (its ADR-0127 Stage 1).
 
 ## What a drain can move, by banlieue stage
 
@@ -54,7 +55,7 @@ block the drain.
 
 - [x] ADR-0017 accepted, with the answers above; ADR-0004 decision 3 and ADR-0015 marked amended
 - [x] CALM for `HostsMatch`: the zone controller reads its members' Providers
-- [ ] CALM: faubourg's controller gains the relationship to banlieue `VirtualMachine`s (read)
+- [x] CALM: faubourg's controller gains the relationship to banlieue `VirtualMachine`s (read)
   and `VirtualMachineMove`s (create, read, delete); `make calm-validate`
 - [x] `banlieue-api` bumped to the release that exports `LABEL_ZONE` and the
   `VirtualMachineMove` type: `=0.5.7`; `zone.rs` takes `RAW_VMM` and `RAW_CPU_MODEL` from it
@@ -68,28 +69,30 @@ block the drain.
   (`HostsDiffer`, `HostsUnreported`), advisory, not part of `Ready`; the zone controller wakes on
   a member Provider's change (`zone.rs`; `controller-test`); docs in `docs/concepts.md`;
   threat-model fifteenth pass
-- [ ] Decision 2: `Host.spec.maintenance` (`None` | `Drain`), CRD regenerated (`make crds`);
-  `Drain` implies the cordon labels
-- [ ] Fail closed: with no `VirtualMachineMove` CRD served, `Drain` sets `Drained=False`,
-  reason `MovesUnsupported`, and creates nothing; tested
-- [ ] Decision 3: the drain planner as a pure function (VMs on the host, moves in flight,
+- [x] Decision 2: `Host.spec.maintenance` (`None` | `Drain`), CRD regenerated (`make crds`);
+  `Drain` implies the cordon labels (`provider.rs`, `a_draining_host_is_cordoned`)
+- [x] Fail closed: with no `VirtualMachineMove` CRD served, `Drain` sets `Drained=False`,
+  reason `MovesUnsupported`, and creates nothing; tested (`drain.rs`; a 404 on the list is
+  "not served", never "empty"). Also `HostNotReady` and `ProviderUnknown`
+- [x] Decision 3: the drain planner as a pure function (VMs on the host, moves in flight,
   limit) returning moves to create and delete; one in flight per host
-  (`MAX_MOVES_PER_HOST = 1`); moves labelled with the Host's name; table tests
-- [ ] Decision 4: `Drained` condition, `True` when no VM is scheduled on the host, else
+  (`MAX_MOVES_PER_HOST = 1`); moves labelled with the Host's name; table tests (`drain.rs`);
+  a draining Host is re-read every 20 s rather than watching banlieue's kinds
+- [x] Decision 4: `Drained` condition, `True` when no VM is scheduled on the host, else
   `False` with `MovesBlocked` and the blocked VMs named (bounded); never retried in a loop,
   never deleting a VM
-- [ ] Decision 5: clearing `maintenance` deletes moves still `Pending`, `Preparing` or
+- [x] Decision 5: clearing `maintenance` deletes moves still `Pending`, `Preparing` or
   `Copying`, leaves the rest
-- [ ] Decision 7: RBAC (`get`/`list`/`watch` on `virtualmachines`; `create`/`get`/`list`/
+- [x] Decision 7: RBAC (`get`/`list`/`watch` on `virtualmachines`; `create`/`get`/`list`/
   `watch`/`delete` on `virtualmachinemoves`), nothing more; `make controller-test` proves a
-  `patch` on a VM is refused
-- [ ] kind: a fake `VirtualMachineMove` CRD and a stub that advances phases, so the planner,
+  `patch`, `update` or `delete` on a VM, and a `patch` on a move, is refused
+- [x] kind: banlieue's `VirtualMachine` and `VirtualMachineMove` CRDs from banlieue-api, phases set by hand, so the planner,
   cancellation and the blocked report are tested without hosts (`make controller-test`)
-- [ ] Docs: `docs/concepts.md` (drain, what a zone promises), a maintenance guide, README
-  status table
-- [ ] Threat model: full pass for ADR-0017 (faubourg may now ask banlieue to move any VM on a
+- [x] Docs: `docs/concepts.md` (draining a host, the `Drained` reasons), README status table.
+  A step-by-step maintenance guide waits for banlieue's mover, so it can show a real drain
+- [x] Threat model: full pass for ADR-0017 (faubourg may now ask banlieue to move any VM on a
   host it manages; cluster-wide read of VMs; the zone label as a security statement), stamp
-  bumped
+  bumped: sixteenth pass (zone key) and seventeenth (the drain: A-14, A-15, six TB-1 rows, R-15)
 - [ ] Live: two matching Cloud Hypervisor hosts in one zone, a non-vTPM VM drained from one to
   the other with the same MAC and address; a sealed VM reported blocked (Stage 1), then moved
   (Stage 2)

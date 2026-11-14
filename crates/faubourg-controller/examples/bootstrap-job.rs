@@ -12,8 +12,8 @@
 //! script with no pinned digest, so nothing here trusts either value.
 
 use faubourg_api::host::{
-    BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, ScriptRef, ScriptSourceKind,
-    SecretName, SshSpec,
+    BootstrapSpec, DEFAULT_SCRIPT_KEY, Host, HostKeyPolicy, HostSpec, Maintenance, ScriptRef,
+    ScriptSourceKind, SecretName, SshSpec,
 };
 use faubourg_api::policy::parse_policy;
 use faubourg_controller::job::{
@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
             bootstrap: BootstrapSpec::default(),
             cordoned: false,
+            maintenance: Maintenance::None,
         },
     );
     host.metadata.uid = Some("8f6b8a52-0000-4000-8000-000000000001".into());
