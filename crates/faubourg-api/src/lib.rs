@@ -32,6 +32,11 @@ pub const LABEL_CORDONED: &str = "faubourg.firestoned.io/cordoned";
 /// faubourg sets it with [`LABEL_CORDONED`]. A copy of `banlieue_api::banlieue::LABEL_UNSCHEDULABLE`,
 /// which faubourg-api does not depend on; the controller's tests fail if the two differ.
 pub const LABEL_BANLIEUE_UNSCHEDULABLE: &str = "banlieue.io/unschedulable";
+/// banlieue's zone key (banlieue ADR-0127): faubourg sets it to the zone's name on every member
+/// host's Provider (ADR-0017 decision 1), stating that the zone's hosts share the L2 segments behind
+/// their network classes, so banlieue may move a VM between them. A copy of
+/// `banlieue_api::banlieue::LABEL_ZONE`; the controller's tests fail if the two differ.
+pub const LABEL_BANLIEUE_ZONE: &str = "banlieue.io/zone";
 /// Prefix of every label key faubourg owns; a zone's `providerLabels` may not use it.
 pub const LABEL_PREFIX: &str = "faubourg.firestoned.io/";
 

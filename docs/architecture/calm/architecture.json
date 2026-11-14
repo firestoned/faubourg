@@ -83,7 +83,7 @@
       "unique-id": "data-asset-provider-cr",
       "node-type": "data-asset",
       "name": "banlieue Provider (one per host)",
-      "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager; its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
+      "description": "Class cloud-hypervisor. Created by faubourg with the zone, host and cordon labels it owns by field manager, and banlieue's zone key banlieue.io/zone while the Host's zone exists and is valid (ADR-0017 decision 1: the statement that lets banlieue move a VM between the zone's hosts, banlieue ADR-0127); its status (failure domain, capacity, Ready) is written by the host-resident provider (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
     },
     {
       "unique-id": "system-ch-host",
@@ -397,7 +397,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
+      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011).",
       "relationship-type": {
         "connects": {
           "source": {

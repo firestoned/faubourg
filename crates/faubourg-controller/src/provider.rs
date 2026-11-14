@@ -17,7 +17,9 @@ use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment, Worklo
 use faubourg_api::host::{BootstrapMethod, Host};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
-use faubourg_api::{LABEL_BANLIEUE_UNSCHEDULABLE, LABEL_CORDONED, LABEL_HOST, LABEL_ZONE};
+use faubourg_api::{
+    LABEL_BANLIEUE_UNSCHEDULABLE, LABEL_BANLIEUE_ZONE, LABEL_CORDONED, LABEL_HOST, LABEL_ZONE,
+};
 use serde_json::{Value, json};
 
 /// The field manager for the labels faubourg owns on a Provider, and for everything else the
@@ -32,8 +34,9 @@ pub const REASON_CLASS_NOT_EXTERNAL: &str = "ProviderClassNotExternal";
 /// Reason: waiting for banlieue's operator to give the Provider its identity.
 pub const REASON_AWAITING_IDENTITY: &str = "AwaitingProviderIdentity";
 
-/// The labels faubourg owns on a host's Provider: the zone's `providerLabels`, then the zone,
-/// the host and, while cordoned, faubourg's cordon label and banlieue's (`banlieue.io/unschedulable`,
+/// The labels faubourg owns on a host's Provider: the zone's `providerLabels`, then the zone
+/// (faubourg's key, and banlieue's `banlieue.io/zone` while the zone exists and is valid), the
+/// host and, while cordoned, faubourg's cordon label and banlieue's (`banlieue.io/unschedulable`,
 /// which banlieue's scheduler enforces). `providerLabels` cannot set a key under
 /// `faubourg.firestoned.io/` (the zone's validation refuses it), and faubourg's own are
 /// written last regardless.
@@ -43,6 +46,13 @@ pub fn labels(host: &Host, zone: Option<&AvailabilityZone>) -> BTreeMap<String, 
         .map(|z| z.spec.provider_labels.clone())
         .unwrap_or_default();
     l.insert(LABEL_ZONE.into(), host.spec.zone_ref.clone());
+    // banlieue moves VMs between Providers sharing this key (ADR-0017 decision 1), so it is
+    // stated only for the zone the Host names, and only while that zone exists and is valid.
+    if zone.is_some_and(|z| {
+        z.metadata.name.as_deref() == Some(host.spec.zone_ref.as_str()) && z.spec.validate().is_ok()
+    }) {
+        l.insert(LABEL_BANLIEUE_ZONE.into(), host.spec.zone_ref.clone());
+    }
     if let Some(name) = host.metadata.name.as_deref() {
         l.insert(LABEL_HOST.into(), name.into());
     }
@@ -311,6 +321,49 @@ mod tests {
         assert_eq!(
             LABEL_BANLIEUE_UNSCHEDULABLE,
             banlieue_api::banlieue::LABEL_UNSCHEDULABLE
+        );
+    }
+
+    #[test]
+    fn faubourgs_copy_of_banlieues_zone_label_matches_banlieue() {
+        assert_eq!(LABEL_BANLIEUE_ZONE, banlieue_api::banlieue::LABEL_ZONE);
+    }
+
+    /// ADR-0017 decision 1: a member host's Provider carries banlieue's zone key, which is what
+    /// lets banlieue move a VM between it and the zone's other hosts (banlieue ADR-0127).
+    #[test]
+    fn a_member_host_carries_banlieues_zone_label() {
+        let z = zone(&json!({}), "Local");
+        for method in [BootstrapMethod::Script, BootstrapMethod::None] {
+            let l = labels(&host(method), Some(&z));
+            assert_eq!(
+                l.get(LABEL_BANLIEUE_ZONE).map(String::as_str),
+                Some("az1"),
+                "{method:?}"
+            );
+        }
+    }
+
+    /// The label is faubourg's statement that the hosts share their L2 segments, so it is made
+    /// only for a zone that exists and is valid. A missing or refused zone states nothing, and
+    /// the label's removal follows from server-side apply.
+    #[test]
+    fn banlieues_zone_label_needs_a_zone_that_exists_and_is_valid() {
+        let h = host(BootstrapMethod::Script);
+        assert!(
+            !labels(&h, None).contains_key(LABEL_BANLIEUE_ZONE),
+            "no zone"
+        );
+        let shared = zone(&json!({}), "Shared");
+        assert!(
+            !labels(&h, Some(&shared)).contains_key(LABEL_BANLIEUE_ZONE),
+            "a refused zone"
+        );
+        let mut other = zone(&json!({}), "Local");
+        other.metadata.name = Some("az2".into());
+        assert!(
+            !labels(&h, Some(&other)).contains_key(LABEL_BANLIEUE_ZONE),
+            "a zone the Host does not name"
         );
     }
 

@@ -43,11 +43,9 @@ pub const REASON_HOSTS_MATCH: &str = "HostsMatch";
 pub const REASON_HOSTS_DIFFER: &str = "HostsDiffer";
 /// Reason: a member's Provider does not report both, or none reports at all.
 pub const REASON_HOSTS_UNREPORTED: &str = "HostsUnreported";
-/// The failure domain's raw attribute carrying the VMM version, as banlieue's Cloud Hypervisor
-/// provider publishes it.
-pub const RAW_VMM: &str = "vmm";
-/// The failure domain's raw attribute carrying the host CPU model.
-pub const RAW_CPU_MODEL: &str = "cpuModel";
+/// The failure domains' raw attributes carrying the VMM version and the host CPU model, as
+/// banlieue defines them (banlieue ADR-0127 Decision 3, which admits a move only where both match).
+pub use banlieue_api::banlieue::{RAW_CPU_MODEL, RAW_VMM};
 /// At most this many hosts are named in a condition message; the rest are counted.
 const MAX_NAMED_HOSTS: usize = 10;
 
