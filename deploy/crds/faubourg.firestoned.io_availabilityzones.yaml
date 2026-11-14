@@ -120,13 +120,11 @@ spec:
               cordonedHosts:
                 default: 0
                 description: "Of the ready ones, those cordoned: healthy, but no place for new VMs (ADR-0015)."
-                format: uint32
                 minimum: 0.0
                 type: integer
               hosts:
                 default: 0
                 description: Hosts whose `zoneRef` names this zone.
-                format: uint32
                 minimum: 0.0
                 type: integer
               observedGeneration:
@@ -137,7 +135,6 @@ spec:
               readyHosts:
                 default: 0
                 description: Of those, hosts in phase `Ready`.
-                format: uint32
                 minimum: 0.0
                 type: integer
             type: object

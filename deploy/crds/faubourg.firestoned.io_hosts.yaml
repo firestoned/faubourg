@@ -106,7 +106,6 @@ spec:
                   port:
                     default: 22
                     description: SSH port.
-                    format: uint16
                     maximum: 65535.0
                     minimum: 0.0
                     type: integer
