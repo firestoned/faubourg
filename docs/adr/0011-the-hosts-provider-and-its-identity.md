@@ -157,3 +157,9 @@ ServiceAccount name. banlieue's operator publishes it in the Provider's
 decision 2 waits for it: until it is there, and a valid object name, the Host stays `Pending`,
 `AwaitingProviderIdentity`. The Job is created with that name. The token policy still bounds
 the name by `providerServiceAccountPrefix`, so a wrong value is refused, not trusted.
+
+*Amended 2026-11-18 by ADR-0018:* decision 1's class is the zone's
+(`AvailabilityZone.spec.providerClassRef`, defaulting to `--provider-class`), checked against a
+closed set of backends; `ProviderClassNotExternal` becomes `ProviderBackendUnsupported`.
+Decisions 6 to 10 apply to External backends only. Decision 8's `providerServiceAccountPrefix`
+becomes a list, `providerServiceAccountPrefixes`, one entry per External class in use.

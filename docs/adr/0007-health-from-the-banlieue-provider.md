@@ -36,3 +36,8 @@ nothing on Leases.
 *Amended 2026-11-08 by ADR-0015:* decision 2's zone `Ready` counts only hosts that are `Ready`
 and not cordoned (a zone whose every ready host is cordoned is `AllReadyHostsCordoned`), and
 the status gains `cordonedHosts`. The zone controller writes it.
+
+*Amended 2026-11-18 by ADR-0018 (decision 8):* a live Lease means a live host only for an
+`External` Provider. A `Managed` (libvirt) Provider's Lease is renewed in the cluster, so its
+Host is `Ready` on `Ready=True` and `ProviderReachable=True` for the Provider's current
+generation, and `Degraded` when either is not.

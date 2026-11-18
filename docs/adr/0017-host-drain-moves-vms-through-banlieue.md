@@ -126,3 +126,7 @@ owns the host agent and VM placement).
 - Threat model: a new row for a compromised or misconfigured faubourg asking banlieue to move
   VMs (D: moves churn a zone; mitigated by banlieue's admission checks and the in-flight limit)
   and the new RBAC.
+
+*Amended 2026-11-18 by ADR-0018 (decision 9):* a drain asks banlieue for moves only on a
+backend banlieue can move (`cloud-hypervisor`). On any other it cordons the host and reports
+`MovesUnsupported`.

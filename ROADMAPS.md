@@ -13,6 +13,7 @@ changes a roadmap item's state.
 | 01 | Host controller and bootstrap Job | ✅ done | [01-host-controller-and-bootstrap.md](.github/community/01-host-controller-and-bootstrap.md) |
 | 02 | Zone health and cordon | ✅ done | [02-zone-health-and-cordon.md](.github/community/02-zone-health-and-cordon.md) |
 | 03 | Host drain through banlieue VM moves (ADR-0017, banlieue ADR-0127) | 🔶 in progress | [03-host-drain-and-vm-moves.md](.github/community/03-host-drain-and-vm-moves.md) |
+| 04 | Provider-agnostic zones: Cloud Hypervisor, Firecracker, libvirt (ADR-0018) | 🔶 in progress | [04-provider-agnostic-zones.md](.github/community/04-provider-agnostic-zones.md) |
 
 Statuses: ✅ done · 🔶 in progress · ⛔ not started · 📄 reference doc.
 ADRs are separate and live in [`docs/adr/`](docs/adr/).

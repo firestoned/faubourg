@@ -15,14 +15,14 @@ Mermaid `flowchart TD`, one diagram per flow, linking the transitions in
 sequence order.
 
 
-## Add a host to a zone
+## Add a host-resident (Cloud Hypervisor or Firecracker) host to a zone
 
 From a new Host object to a host banlieue can place VMs on.
 
 ```mermaid
 flowchart TD
     t1["1. Operator creates the SSH Secret and a Host with zoneRef."]
-    t2["2. Host controller checks the zone and the External class, applies the host's Provider, waits for banlieue to give it an identity, then creates the bootstrap Job; phase Bootstrapping."]
+    t2["2. Host controller checks the zone and its ProviderClass's backend (External for a host-resident provider), applies the host's Provider, waits for banlieue to give it an identity, then creates the bootstrap Job; phase Bootstrapping."]
     t3["3. The Job's pod mounts that host's Secret(s) and the script source."]
     t4["4. The Job mints the provider's first token, verifies the host key, places the script if absent or changed, and runs sudo -n /opt/faubourg/install.sh with the credential on stdin."]
     t5["5. The install script installs the credential where banlieue's provider reads it; the Provider carries faubourg's zone labels (ADR-0011)."]
@@ -32,4 +32,22 @@ flowchart TD
 ```
 
 <sub>Source: flow `flow-add-host` in `architecture.json`.</sub>
+
+
+## Add a libvirt host to a zone (planned, roadmap 04)
+
+From a new Host in a libvirt zone to a host banlieue can place VMs on (ADR-0018).
+
+```mermaid
+flowchart TD
+    t1["1. Operator creates the zone's faubourg- prefixed client credential and CA in banlieue's namespace, a zone naming a libvirt ProviderClass, the SSH Secret and the Host."]
+    t2["2. Host controller reads the class: backend libvirt, Managed; picks the libvirt driver."]
+    t3["3. It applies the Provider with qemu+tls://<address>/system and the zone's credentialsRef and caBundle; faubourg-provider-connection admits the faubourg- name."]
+    t4["4. The Job, with no kube-api volume, verifies the host key, places the script if needed and runs sudo -n /opt/faubourg/install.sh, which sets up libvirtd with TLS."]
+    t5["5. banlieue's in-cluster libvirt provider dials the host with the zone's client certificate and publishes one failure domain."]
+    t6["6. Provider Ready and ProviderReachable for its generation: Host Ready; banlieue may place VMs on it."]
+    t1 --> t2 --> t3 --> t4 --> t5 --> t6
+```
+
+<sub>Source: flow `flow-add-libvirt-host` in `architecture.json`.</sub>
 

@@ -48,3 +48,7 @@ cordoned Host's `Provider` also carries banlieue's own cordon label, `banlieue.i
 "true"`, which banlieue's scheduler (v0.5.3 on) enforces for every new placement while leaving
 the VMs already there in place. faubourg owns that label as it owns its own: it comes and goes
 with `cordoned`, and a zone's `providerLabels` may not set it.
+
+*Amended 2026-11-18 by ADR-0018:* decision 2's zone spec gains `providerClassRef` (immutable,
+defaulting to the controller's `--provider-class`) and, for a libvirt zone, `libvirt`
+(`credentialsRef`, `caBundleRef`). Decision 4's Provider class is the zone's.
