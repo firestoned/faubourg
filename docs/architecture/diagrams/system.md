@@ -34,32 +34,43 @@ flowchart LR
     system-banlieue["banlieue"]
     data-asset-provider-cr["banlieue Provider (one per host)"]
     data-asset-banlieue-vm-crs["banlieue VirtualMachines and VirtualMachineMoves"]
-    system-ch-host["Cloud Hypervisor host"]
+    system-vmm-host["Cloud Hypervisor or Firecracker host"]
     data-asset-install-script["Install script source"]
     data-asset-host-install-script["/opt/faubourg/install.sh"]
     service-ssh["sshd"]
-    service-banlieue-ch-provider["banlieue Cloud Hypervisor provider"]
-    service-cloud-hypervisor["cloud-hypervisor (one per VM)"]
+    service-banlieue-host-provider["banlieue host-resident provider"]
+    service-vmm["VMM (one per VM)"]
     network-host-mgmt["Host management network"]
     data-asset-install-file["Install file (faubourg-<version>.yaml)"]
+    data-asset-provider-class["banlieue ProviderClass"]
+    system-libvirt-host["libvirt host (planned, roadmap 04)"]
+    service-libvirtd["libvirtd (planned, roadmap 04)"]
+    service-banlieue-libvirt-provider["banlieue libvirt provider (planned, roadmap 04)"]
+    data-asset-libvirt-client-credential["libvirt client credential and CA (planned, roadmap 04)"]
+    service-provider-connection-policy["Provider connection admission policy (planned, roadmap 04)"]
     subgraph sg_system-faubourg [System Faubourg]
         service-host-controller
         service-zone-controller
         service-bootstrap-job
         service-bootstrap-admission-policy
         data-asset-host-az-crs
+        service-provider-connection-policy
     end
-    subgraph sg_system-ch-host [System Ch Host]
+    subgraph sg_system-vmm-host [System Vmm Host]
         service-ssh
         data-asset-host-install-script
-        service-banlieue-ch-provider
-        service-cloud-hypervisor
+        service-banlieue-host-provider
+        service-vmm
     end
     subgraph sg_system-banlieue [System Banlieue]
         data-asset-provider-cr
+        data-asset-provider-class
+        service-banlieue-libvirt-provider
+        data-asset-libvirt-client-credential
     end
     subgraph sg_network-host-mgmt [Network Host Mgmt]
-        system-ch-host
+        system-vmm-host
+        system-libvirt-host
     end
     actor-platform-operator --> data-asset-host-az-crs
     actor-platform-operator --> data-asset-ssh-secret
@@ -74,8 +85,8 @@ flowchart LR
     service-bootstrap-job --> data-asset-ssh-secret
     service-bootstrap-job --> data-asset-install-script
     service-bootstrap-job -->|TCP| service-ssh
-    service-banlieue-ch-provider -->|HTTPS| ecosystem-kube-api
-    service-banlieue-ch-provider -->|HTTP| service-cloud-hypervisor
+    service-banlieue-host-provider -->|HTTPS| ecosystem-kube-api
+    service-banlieue-host-provider -->|HTTP| service-vmm
     system-banlieue --> data-asset-provider-cr
     system-banlieue --> data-asset-banlieue-vm-crs
     service-host-controller --> data-asset-provider-cr
@@ -83,6 +94,15 @@ flowchart LR
     service-bootstrap-job -->|HTTPS| ecosystem-kube-api
     ecosystem-kube-api -->|HTTPS| ecosystem-ghcr
     actor-platform-operator --> data-asset-install-file
+    subgraph sg_system-libvirt-host [System Libvirt Host]
+        service-libvirtd
+    end
+    service-host-controller --> data-asset-provider-class
+    service-zone-controller --> data-asset-provider-class
+    ecosystem-kube-api --> service-provider-connection-policy
+    service-banlieue-libvirt-provider --> data-asset-libvirt-client-credential
+    service-banlieue-libvirt-provider -->|mTLS| service-libvirtd
+    service-banlieue-libvirt-provider -->|HTTPS| ecosystem-kube-api
 ```
 
 <sub>Source: nodes and relationships in `architecture.json`.</sub>

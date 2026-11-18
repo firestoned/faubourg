@@ -61,3 +61,8 @@ banlieue has already verified on hosts.
 - Anything faubourg wants from a host that the banlieue provider does not publish is a
   banlieue change first.
 - Supersedes the design sketch's "host agent", "scheduler" and milestone 2 and 3.
+
+*Amended 2026-11-18 by ADR-0018:* decision 1 names the host agent for External provider classes
+(Cloud Hypervisor, Firecracker): banlieue's host-resident provider. On a libvirt host the agent
+is libvirtd, driven by banlieue's provider in the cluster. faubourg still ships no agent and no
+scheduler.
