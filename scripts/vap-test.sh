@@ -326,6 +326,35 @@ token_deny "a token for another audience" "own audience" \
   banlieue-provider-cloud-hypervisor-hv01 --duration=1h --audience=vault
 token_deny "a token bound to an object" "bound to no object" \
   banlieue-provider-cloud-hypervisor-hv01 --duration=1h --bound-object-kind=Secret --bound-object-name=x
+
+echo "--- provider tokens for every listed External class (ADR-0018 decision 5)"
+kubectl -n banlieue-system create serviceaccount banlieue-provider-firecracker-fc01 >/dev/null
+token_deny "a token for an External class that is not listed" "only for a provider ServiceAccount" \
+  banlieue-provider-firecracker-fc01 --duration=1h
+prefixes() { # value, ServiceAccount whose admission shows the API server uses it, yes|no
+  kubectl -n faubourg-system patch configmap faubourg-bootstrap-policy --type=merge \
+    -p "{\"data\": {\"providerServiceAccountPrefixes\": \"$1\"}}" >/dev/null
+  for _ in $(seq 1 30); do
+    if token "$2" --duration=1h >/dev/null; then [ "$3" = yes ] && return 0
+    else [ "$3" = no ] && return 0; fi
+    sleep 1
+  done
+}
+prefixes "banlieue-provider-cloud-hypervisor-,banlieue-provider-firecracker-" \
+  banlieue-provider-firecracker-fc01 yes
+token_ok "a token for a second listed class" banlieue-provider-firecracker-fc01 --duration=24h
+token_ok "and the first listed class still" banlieue-provider-cloud-hypervisor-hv01 --duration=24h
+token_deny "and an unlisted class still not" "only for a provider ServiceAccount" \
+  banlieue-provider-libvirt-kvm01 --duration=1h
+token_deny "and banlieue's operator still not" "only for a provider ServiceAccount" \
+  banlieue-operator --duration=1h
+prefixes "banlieue-provider-" banlieue-provider-cloud-hypervisor-hv01 no
+token_deny "a bare banlieue-provider- prefix admits nothing" "must set providerServiceAccountPrefixes" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=1h
+prefixes "banlieue-provider-cloud-hypervisor-," banlieue-provider-cloud-hypervisor-hv01 no
+token_deny "an empty entry admits nothing" "must set providerServiceAccountPrefixes" \
+  banlieue-provider-cloud-hypervisor-hv01 --duration=1h
+prefixes "banlieue-provider-cloud-hypervisor-" banlieue-provider-cloud-hypervisor-hv01 yes
 if out="$(kubectl -n banlieue-system create token banlieue-operator --duration=1h 2>&1)"; then
   pass "the policy binds only the bootstrap pods (cluster-admin mints as before)"
 else fail "the token policy's scope" "cluster-admin refused: $out"; fi

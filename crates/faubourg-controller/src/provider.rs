@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment, WorkloadMode};
+use banlieue_api::banlieue::{Provider, WorkloadMode};
 use faubourg_api::host::{BootstrapMethod, Host, Maintenance};
 use faubourg_api::validation::is_dns_subdomain;
 use faubourg_api::zone::AvailabilityZone;
@@ -22,6 +22,8 @@ use faubourg_api::{
 };
 use serde_json::{Value, json};
 
+use crate::backend::Backend;
+
 /// The field manager for the labels faubourg owns on a Provider, and for everything else the
 /// Host controller writes.
 pub const LABELS_MANAGER: &str = "faubourg.firestoned.io/host-controller";
@@ -29,8 +31,6 @@ pub const LABELS_MANAGER: &str = "faubourg.firestoned.io/host-controller";
 /// `connection.endpoint`.
 pub const SPEC_MANAGER: &str = "faubourg.firestoned.io/host-provider-spec";
 
-/// Reason: the configured `ProviderClass` is missing or not `External` (ADR-0011 decision 1).
-pub const REASON_CLASS_NOT_EXTERNAL: &str = "ProviderClassNotExternal";
 /// Reason: waiting for banlieue's operator to give the Provider its identity.
 pub const REASON_AWAITING_IDENTITY: &str = "AwaitingProviderIdentity";
 
@@ -77,9 +77,9 @@ pub fn labels_body(host: &Host, zone: Option<&AvailabilityZone>, namespace: &str
 }
 
 /// The spec's apply body, under [`SPEC_MANAGER`], for a bootstrapped Host (ADR-0011 decision
-/// 2): class and endpoint (`ch://<address>`). `None` for an adopted Host, whose spec faubourg
-/// never sets, and for a Host with no name.
-pub fn spec_body(host: &Host, class: &str, namespace: &str) -> Option<Value> {
+/// 2): its zone's class and the backend's endpoint for its address (ADR-0018). `None` for an
+/// adopted Host, whose spec faubourg never sets, and for a Host with no name.
+pub fn spec_body(host: &Host, backend: Backend, class: &str, namespace: &str) -> Option<Value> {
     if host.spec.bootstrap.method != BootstrapMethod::Script {
         return None;
     }
@@ -88,7 +88,7 @@ pub fn spec_body(host: &Host, class: &str, namespace: &str) -> Option<Value> {
         name,
         namespace,
         class,
-        &format!("ch://{}", host.spec.address),
+        &backend.endpoint(&host.spec.address),
     ))
 }
 
@@ -133,11 +133,6 @@ fn spec_apply(name: &str, namespace: &str, class: &str, endpoint: &str) -> Value
             "connection": { "endpoint": endpoint },
         },
     })
-}
-
-/// True when the class exists and is `External` (banlieue ADR-0060 decision 3).
-pub fn class_is_external(class: Option<&ProviderClass>) -> bool {
-    class.is_some_and(|c| c.spec.deployment_mode() == ProviderDeployment::External)
 }
 
 /// True once banlieue's operator has given the Provider its identity: `status.workload.mode:
@@ -195,22 +190,11 @@ mod tests {
         .unwrap()
     }
 
-    fn class(deployment: Option<&str>) -> ProviderClass {
-        let mut spec = json!({ "backend": "cloud-hypervisor" });
-        if let Some(d) = deployment {
-            spec["deployment"] = json!(d);
-        }
-        serde_json::from_value(json!({
-            "apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass",
-            "metadata": { "name": "cloud-hypervisor" }, "spec": spec
-        }))
-        .unwrap()
-    }
-
     #[test]
     fn a_bootstrapped_host_gets_class_and_endpoint_under_the_spec_manager() {
         let b = spec_body(
             &host(BootstrapMethod::Script),
+            Backend::CloudHypervisor,
             "cloud-hypervisor",
             "banlieue-system",
         )
@@ -229,7 +213,12 @@ mod tests {
         // The body parses as a Provider: what the API server will validate.
         let _: Provider = serde_json::from_value(b).unwrap();
         assert_eq!(
-            spec_body(&host(BootstrapMethod::None), "cloud-hypervisor", "ns"),
+            spec_body(
+                &host(BootstrapMethod::None),
+                Backend::CloudHypervisor,
+                "cloud-hypervisor",
+                "ns"
+            ),
             None,
             "never an adopted Provider's spec"
         );
@@ -398,17 +387,6 @@ mod tests {
         );
         let shared = zone(&json!({ "extra": "x" }), "Shared");
         assert!(!labels(&host(BootstrapMethod::Script), Some(&shared)).contains_key("extra"));
-    }
-
-    #[test]
-    fn only_an_external_class_will_do() {
-        assert!(class_is_external(Some(&class(Some("External")))));
-        assert!(!class_is_external(Some(&class(Some("Managed")))));
-        assert!(
-            !class_is_external(Some(&class(None))),
-            "the default is Managed"
-        );
-        assert!(!class_is_external(None));
     }
 
     fn provider(status: &Value) -> Provider {

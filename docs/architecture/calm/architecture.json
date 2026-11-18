@@ -23,13 +23,13 @@
       "unique-id": "service-host-controller",
       "node-type": "service",
       "name": "Host controller",
-      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), writes status by server-side apply, and drains a Host whose spec.maintenance is Drain: it cordons the Provider, then asks banlieue to move the Host's VMs one at a time by creating VirtualMachineMoves with no target, reports Drained (MovesBlocked naming the VMs banlieue would not move), and on maintenance None deletes its moves that have not reached HandingOver (ADR-0017). It never updates or deletes a VirtualMachine. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token. Planned (roadmap 04, ADR-0018): the Provider's class is the zone's, and its endpoint, required deployment mode and first credential come from a driver chosen by the class's backend; a Host whose existing Provider has another class is ProviderClassMismatch, two Hosts with one literal address are DuplicateAddress; a Managed (libvirt) Host is healthy on Ready and ProviderReachable, not on the Lease; a drain on a backend banlieue cannot move cordons and reports MovesUnsupported."
+      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), writes status by server-side apply, and drains a Host whose spec.maintenance is Drain: it cordons the Provider, then asks banlieue to move the Host's VMs one at a time by creating VirtualMachineMoves with no target, reports Drained (MovesBlocked naming the VMs banlieue would not move), and on maintenance None deletes its moves that have not reached HandingOver (ADR-0017). It never updates or deletes a VirtualMachine. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token. The Provider's class is the zone's (or --provider-class), and its endpoint and required deployment mode come from a driver chosen by the class's backend, from a closed set (cloud-hypervisor today; anything else ProviderBackendUnsupported, for bootstrapped and adopted Hosts alike); a Host whose existing Provider has another class is ProviderClassMismatch, and two Hosts with one literal, case-folded address are both DuplicateAddress (ADR-0018). Planned (roadmap 04): libvirt and firecracker drivers; a Managed (libvirt) Host is healthy on Ready and ProviderReachable, not on the Lease; a drain on a backend banlieue cannot move cordons and reports MovesUnsupported."
     },
     {
       "unique-id": "service-zone-controller",
       "node-type": "service",
       "name": "Zone controller",
-      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. Also HostsMatch (HostsDiffer, HostsUnreported), advisory: whether every member's Provider reports the same raw.vmm and raw.cpuModel, which banlieue requires to move a VM between them (ADR-0017 decision 9). A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015). Planned (roadmap 04): reads the zone's ProviderClass and reports ProviderBackendUnsupported for a backend outside ADR-0018's set; a backend whose Providers do not publish raw.vmm and raw.cpuModel reports HostsUnreported."
+      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. Also HostsMatch (HostsDiffer, HostsUnreported), advisory: whether every member's Provider reports the same raw.vmm and raw.cpuModel, which banlieue requires to move a VM between them (ADR-0017 decision 9). A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015). Reads the zone's ProviderClass and reports ProviderBackendUnsupported for a class it does not drive (ADR-0018 decision 2). Planned (roadmap 04): a backend whose Providers do not publish raw.vmm and raw.cpuModel reports HostsUnreported."
     },
     {
       "unique-id": "service-bootstrap-job",
@@ -41,7 +41,7 @@
       "unique-id": "service-bootstrap-admission-policy",
       "node-type": "service",
       "name": "Bootstrap admission policy",
-      "description": "A ValidatingAdmissionPolicy and binding on the credentials namespace, evaluated by the Kubernetes API server. Every Job there must run the digest-pinned bootstrap image with no command, literal env, read-only credential volumes and a script volume whose source, key and FAUBOURG_SCRIPT_SHA256 match a pinned entry and the restricted security profile; only the Job controller may create Pods there. Parameters live in a ConfigMap in faubourg-system that neither the controller nor a script maintainer can write (ADR-0008, ADR-0013). Planned (roadmap 04): the token policy's providerServiceAccountPrefix becomes a list, one banlieue-provider-<class>- entry per External class in use (ADR-0018 decision 5)."
+      "description": "A ValidatingAdmissionPolicy and binding on the credentials namespace, evaluated by the Kubernetes API server. Every Job there must run the digest-pinned bootstrap image with no command, literal env, read-only credential volumes and a script volume whose source, key and FAUBOURG_SCRIPT_SHA256 match a pinned entry and the restricted security profile; only the Job controller may create Pods there. Parameters live in a ConfigMap in faubourg-system that neither the controller nor a script maintainer can write (ADR-0008, ADR-0013). The token policy admits a TokenRequest only for a name under one of providerServiceAccountPrefixes, one banlieue-provider-<class>- entry per External class in use; a bare prefix or an empty entry admits nothing (ADR-0018 decision 5)."
     },
     {
       "unique-id": "data-asset-bootstrap-policy-params",
@@ -271,7 +271,7 @@
     },
     {
       "unique-id": "rel-host-controller-kube",
-      "description": "Watches Host, AvailabilityZone, its own Jobs (by owner UID) in the credentials namespace and Providers in banlieue's namespace; reads Pods there for a failed Job's exit code and a succeeded Job's host key fingerprint (ADR-0010 decision 8); creates and deletes Jobs; applies Host status. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008, ADR-0009).",
+      "description": "Watches Host (every Host, for DuplicateAddress), AvailabilityZone, ProviderClass, its own Jobs (by owner UID) in the credentials namespace and Providers in banlieue's namespace; reads Pods there for a failed Job's exit code and a succeeded Job's host key fingerprint (ADR-0010 decision 8); creates and deletes Jobs; applies Host status. No Secret or ConfigMap access in the credentials namespace; every Job it creates passes the bootstrap admission policy (ADR-0008, ADR-0009).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -342,7 +342,7 @@
     },
     {
       "unique-id": "rel-zone-controller-kube",
-      "description": "Reads AvailabilityZones, Hosts, the members' Providers and (roadmap 04) the zone's ProviderClass; patches availabilityzones/status only (ADR-0015, ADR-0017).",
+      "description": "Reads AvailabilityZones, Hosts, the members' Providers and the zone's ProviderClass; patches availabilityzones/status only (ADR-0015, ADR-0017).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -458,7 +458,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011). Planned (roadmap 04): the class is the zone's; the endpoint is the backend's; for libvirt the spec manager also owns connection.credentialsRef and connection.caBundle, from the zone (ADR-0018).",
+      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011). The class is the zone's and the endpoint the backend's (ADR-0018). Planned (roadmap 04): for libvirt the spec manager also owns connection.credentialsRef and connection.caBundle, from the zone.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -487,7 +487,7 @@
     },
     {
       "unique-id": "rel-job-token-request",
-      "description": "Requests a day's token for the host Provider's ServiceAccount (TokenRequest), as faubourg-bootstrap with a 10-minute projected token; bounded by RBAC and the faubourg-provider-tokens admission policy to provider ServiceAccounts of the listed External classes (one class today; a list in roadmap 04, ADR-0018 decision 5). Only for External backends, at most a day, no audience or binding (ADR-0011).",
+      "description": "Requests a day's token for the host Provider's ServiceAccount (TokenRequest), as faubourg-bootstrap with a 10-minute projected token; bounded by RBAC and the faubourg-provider-tokens admission policy to provider ServiceAccounts of the listed External classes (ADR-0018 decision 5). Only for External backends, at most a day, no audience or binding (ADR-0011).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -541,7 +541,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-class",
-      "description": "Reads the zone's ProviderClass (get, cluster-scoped) for its backend and deployment mode, and picks the driver; no write (ADR-0011, ADR-0018).",
+      "description": "Reads and watches the zone's ProviderClass (get, list, watch; cluster-scoped) for its backend and deployment mode, and picks the driver; no write (ADR-0011, ADR-0018).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -555,7 +555,7 @@
     },
     {
       "unique-id": "rel-zone-controller-provider-class",
-      "description": "Planned (roadmap 04): reads the zone's ProviderClass to report ProviderBackendUnsupported (ADR-0018 decision 2).",
+      "description": "Reads (get, list, watch) the zone's ProviderClass to report ProviderBackendUnsupported (ADR-0018 decision 2).",
       "relationship-type": {
         "connects": {
           "source": {

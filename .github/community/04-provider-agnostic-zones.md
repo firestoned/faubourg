@@ -7,8 +7,8 @@ Implements ADR-0018: a zone names one banlieue ProviderClass, and faubourg drive
 through a driver chosen by the class's `backend`. Each Host is still one Provider and one
 banlieue failure domain; the zone is still a label on those failure domains. ADD cycle per item.
 
-**Status: in progress.** ADR-0018 Accepted 2026-11-18; CALM updated, the libvirt and Firecracker
-parts marked planned. Firecracker (phase D) is gated on
+**Status: in progress.** ADR-0018 Accepted 2026-11-18; CALM updated. Phase B (the driver seam)
+done; the libvirt and Firecracker parts are planned. Firecracker (phase D) is gated on
 banlieue's Firecracker provider (banlieue roadmap 20); phases B and C do not wait for it.
 
 ## Backends in scope
@@ -43,16 +43,21 @@ need per-failure-domain labels and cordon in banlieue first.
 
 ### B. The driver seam (no behaviour change for Cloud Hypervisor)
 
-- [ ] Mechanical refactor: endpoint, required deployment mode and credential path behind a
-      `Backend` driver chosen from `ProviderClass.spec.backend`; existing tests stay green
-- [ ] `AvailabilityZone.spec.providerClassRef`, optional, immutable (CEL); `make crds`
-- [ ] Fallback to `--provider-class` when omitted; test that a pre-ADR zone is unchanged
-- [ ] Fail closed: unknown backend or mismatched deployment gives `ProviderBackendUnsupported`
-      on the zone and its Hosts, no Provider, no Job (tests first)
-- [ ] `ProviderClassMismatch` for a Host whose existing Provider has another class
-- [ ] `DuplicateAddress` for two Hosts with one address
-- [ ] Token policy: `providerServiceAccountPrefixes` list; `make vap-test` covers a listed
-      class, an unlisted class and banlieue's operator
+- [x] Mechanical refactor: endpoint and required deployment mode behind a `Backend` driver
+      chosen from `ProviderClass.spec.backend` (`crates/faubourg-controller/src/backend.rs`);
+      existing tests stay green
+- [x] `AvailabilityZone.spec.providerClassRef`, optional, immutable once set (CEL on the
+      root); `make crds`
+- [x] Fallback to `--provider-class` when omitted; a pre-ADR zone serializes unchanged
+- [x] Fail closed: missing class, unknown backend (libvirt and firecracker included, until
+      their phases) or mismatched deployment gives `ProviderBackendUnsupported` on the zone and
+      its Hosts, bootstrapped and adopted alike, no Provider, no Job
+- [x] `ProviderClassMismatch` for a Host whose existing Provider has another class
+- [x] `DuplicateAddress` for two Hosts with one literal address (IPv6 case-folded)
+- [x] Token policy: `providerServiceAccountPrefixes` list; `make vap-test` covers a second
+      listed class, an unlisted class, banlieue's operator, a bare prefix and an empty entry
+- [x] `controller-test`: Managed class, a libvirt zone refused, the class immutable, two Hosts
+      at one address and freeing one
 
 ### C. libvirt
 

@@ -23,15 +23,16 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
-use kube::runtime::reflector::ObjectRef;
+use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use crate::backend::{Backend, class_name};
 use crate::config::Config;
 use crate::drain::{self, DrainInput};
 use crate::job::{CONTAINER, LABEL_COMPONENT, LABEL_MANAGED_BY, LABEL_REBOOTSTRAP};
-use crate::plan::{NotPersisted, World, plan};
+use crate::plan::{CONDITION_READY, NotPersisted, REASON_DUPLICATE_ADDRESS, World, plan};
 use crate::provider;
 use crate::zone;
 
@@ -101,6 +102,8 @@ pub async fn run(client: Client, cfg: Config) {
     let hosts = host_controller.store();
     let every_host = hosts.clone();
     let rollout_hosts = hosts.clone();
+    let class_hosts = hosts.clone();
+    let address_hosts = hosts.clone();
     let policy_name = format!("metadata.name={}", ctx.cfg.policy.name);
     let bootstrap_jobs = bootstrap_jobs();
     let host_loop = host_controller
@@ -157,6 +160,20 @@ pub async fn run(client: Client, cfg: Config) {
             watcher::Config::default().labels(LABEL_HOST),
             |p: Provider| p.labels().get(LABEL_HOST).map(|h| ObjectRef::new(h)),
         )
+        // A class's backend or mode decides every Host of its zones (ADR-0018 decision 2).
+        .watches(
+            ctx.classes.clone(),
+            watcher::Config::default(),
+            move |_: ProviderClass| every(&class_hosts),
+        )
+        // A Host taking or leaving an address decides the others at it (ADR-0018 decision 10):
+        // every Host now at the same address, and every Host refused as a duplicate, which a
+        // Host leaving the address may have freed.
+        .watches(
+            ctx.hosts.clone(),
+            watcher::Config::default(),
+            move |changed: Host| sharing_an_address(&address_hosts, &changed),
+        )
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -188,6 +205,7 @@ async fn run_zones(ctx: Arc<Ctx>) {
             .collect::<Vec<_>>()
     };
     let on_provider = all_zones.clone();
+    let on_class = all_zones.clone();
     zone_controller
         .watches(
             ctx.hosts.clone(),
@@ -198,6 +216,11 @@ async fn run_zones(ctx: Arc<Ctx>) {
             ctx.providers.clone(),
             watcher::Config::default().labels(LABEL_HOST),
             move |_: Provider| on_provider(),
+        )
+        .watches(
+            ctx.classes.clone(),
+            watcher::Config::default(),
+            move |_: ProviderClass| on_class(),
         )
         .shutdown_on_signal()
         .run(reconcile_zone, error_policy_zone, ctx)
@@ -222,7 +245,8 @@ async fn reconcile_zone(az: Arc<AvailabilityZone>, ctx: Arc<Ctx>) -> Result<Acti
         .list(&ListParams::default().labels(LABEL_HOST))
         .await?
         .items;
-    let status = zone::status(&az, &hosts, &providers, &Time(Timestamp::now()));
+    let backend = zone_backend(&ctx, Some(&az)).await?;
+    let status = zone::status(&az, &hosts, &providers, &backend, &Time(Timestamp::now()));
     if az.status.as_ref() != Some(&status) {
         let name = az.name_any();
         let patch = serde_json::json!({
@@ -255,6 +279,62 @@ async fn reconcile_zone(az: Arc<AvailabilityZone>, ctx: Arc<Ctx>) -> Result<Acti
 fn error_policy_zone(az: Arc<AvailabilityZone>, e: &Error, _ctx: Arc<Ctx>) -> Action {
     warn!(zone = %az.name_any(), error = %e, "zone reconcile failed; retrying");
     Action::requeue(RETRY)
+}
+
+/// The zone's class (or the configured default), read and resolved to a backend (ADR-0018). A
+/// class name that is not an object name is never sent to the API server: it resolves to no
+/// class, which fails closed (the zone's own validation also reports it).
+async fn read_class(
+    ctx: &Ctx,
+    zone: Option<&AvailabilityZone>,
+) -> Result<(String, Option<ProviderClass>), Error> {
+    let name = class_name(zone, &ctx.cfg.bootstrap.provider.class).to_string();
+    let class = if is_dns_subdomain(&name) {
+        ctx.classes.get_opt(&name).await?
+    } else {
+        None
+    };
+    Ok((name, class))
+}
+
+async fn zone_backend(
+    ctx: &Ctx,
+    zone: Option<&AvailabilityZone>,
+) -> Result<Result<Backend, String>, Error> {
+    let (name, class) = read_class(ctx, zone).await?;
+    Ok(Backend::of(&name, class.as_ref()))
+}
+
+/// Every Host in the store.
+fn every(hosts: &Store<Host>) -> Vec<ObjectRef<Host>> {
+    hosts
+        .state()
+        .into_iter()
+        .map(|h| ObjectRef::from_obj(&*h))
+        .collect()
+}
+
+/// The Hosts a change to `changed` may refuse or free (ADR-0018 decision 10): every other Host at
+/// its address, and every other Host refused as a duplicate, which `changed` leaving an address
+/// may have freed.
+fn sharing_an_address(hosts: &Store<Host>, changed: &Host) -> Vec<ObjectRef<Host>> {
+    hosts
+        .state()
+        .into_iter()
+        .filter(|h| h.name_any() != changed.name_any())
+        .filter(|h| {
+            h.spec.address.eq_ignore_ascii_case(&changed.spec.address) || refused_as_duplicate(h)
+        })
+        .map(|h| ObjectRef::from_obj(&*h))
+        .collect()
+}
+
+/// True for a Host the reconciler last refused as a duplicate address.
+fn refused_as_duplicate(h: &Host) -> bool {
+    h.status
+        .as_ref()
+        .and_then(|s| s.conditions.iter().find(|c| c.type_ == CONDITION_READY))
+        .is_some_and(|c| c.reason == REASON_DUPLICATE_ADDRESS)
 }
 
 /// True for a re-bootstrap Job, whose every change can hold or release another Host.
@@ -325,10 +405,9 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let pods = ctx.pods.list(&by_host).await?.items;
     let providers = ctx.providers.list(&by_host).await?.items;
     let own_provider = ctx.providers.get_opt(&name).await?;
-    let class = ctx
-        .classes
-        .get_opt(&ctx.cfg.bootstrap.provider.class)
-        .await?;
+    let (_, class) = read_class(&ctx, zone.as_ref()).await?;
+    // Every Host, for DuplicateAddress (ADR-0018 decision 10).
+    let peers = ctx.hosts.list(&ListParams::default()).await?.items;
     let pins = pins(ctx.policy.get_opt(&ctx.cfg.policy.name).await?);
     let now = Time(Timestamp::now());
 
@@ -343,6 +422,7 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         cfg: &ctx.cfg.bootstrap,
         pins: pins.as_ref(),
         fleet: &fleet,
+        peers: &peers,
         now: &now,
         drained: None,
     };

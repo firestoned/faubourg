@@ -165,6 +165,7 @@ pub fn render(crd: &CustomResourceDefinition) -> Result<String, serde_saphyr::se
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zone::ZONE_CLASS_IMMUTABLE;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -338,6 +339,15 @@ mod tests {
         assert!(
             yaml.contains("Shared"),
             "Shared must stay in the schema (ADR-0004)"
+        );
+    }
+
+    #[test]
+    fn a_zones_class_cannot_change_or_go_once_set() {
+        let yaml = render(&AvailabilityZone::crd()).unwrap();
+        assert!(
+            yaml.contains(ZONE_CLASS_IMMUTABLE),
+            "the API server must refuse a change of a zone's class (ADR-0018 decision 3)"
         );
     }
 

@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
-use kube::CustomResource;
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::LABEL_PREFIX;
-use crate::validation::{Errors, Invalid};
+use crate::validation::{Errors, Invalid, is_dns_subdomain};
 
 /// Condition reason when a zone asks for a storage mode v1 does not build (ADR-0004).
 pub const REASON_STORAGE_MODE_UNSUPPORTED: &str = "StorageModeUnsupported";
@@ -20,9 +20,20 @@ pub const REASON_STORAGE_MODE_UNSUPPORTED: &str = "StorageModeUnsupported";
 pub const REASON_RESERVED_LABEL: &str = "ReservedLabel";
 /// Condition reason when a `providerLabels` key or value is not a valid label.
 pub const REASON_INVALID_LABEL: &str = "InvalidLabel";
+/// Condition reason when `providerClassRef.name` is not a valid object name.
+pub const REASON_INVALID_PROVIDER_CLASS_REF: &str = "InvalidProviderClassRef";
+
+/// The CEL rule keeping a zone's class once it is set (ADR-0018 decision 3). Setting it on a
+/// zone that named none is allowed: a member whose Provider has another class is refused
+/// (`ProviderClassMismatch`), not rewritten.
+pub const ZONE_CLASS_IMMUTABLE: &str = "!has(oldSelf.spec.providerClassRef) || (has(self.spec.providerClassRef) && self.spec.providerClassRef.name == oldSelf.spec.providerClassRef.name)";
 
 /// Desired state of an availability zone.
-#[derive(CustomResource, Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// Its class cannot change or be removed once set (ADR-0018 decision 3): banlieue owns a
+/// Provider's workload and identity by class, so moving a Provider between classes is not a
+/// relabel.
+#[derive(CustomResource, Clone, Debug, Default, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[kube(
     group = "faubourg.firestoned.io",
     version = "v1alpha1",
@@ -30,6 +41,9 @@ pub const REASON_INVALID_LABEL: &str = "InvalidLabel";
     plural = "availabilityzones",
     shortname = "az",
     status = "AvailabilityZoneStatus",
+    validation = Rule::new(ZONE_CLASS_IMMUTABLE)
+        .message("a zone's providerClassRef cannot change or be removed once set"),
+    printcolumn = r#"{"name":"Class","type":"string","jsonPath":".spec.providerClassRef.name"}"#,
     printcolumn = r#"{"name":"Storage","type":"string","jsonPath":".spec.storage.mode"}"#,
     printcolumn = r#"{"name":"Hosts","type":"integer","jsonPath":".status.hosts"}"#,
     printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyHosts"}"#,
@@ -48,6 +62,18 @@ pub struct AvailabilityZoneSpec {
     /// reserved.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_labels: BTreeMap<String, String>,
+    /// The banlieue `ProviderClass` every member host's Provider references (ADR-0018). Its
+    /// `backend` decides how faubourg drives the zone's hosts. Omitted: the controller's
+    /// `--provider-class`. It cannot change or be removed once set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_class_ref: Option<ProviderClassRef>,
+}
+
+/// A banlieue `ProviderClass`, by name. Cluster-scoped, so no namespace.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderClassRef {
+    /// The `ProviderClass`'s name.
+    pub name: String,
 }
 
 /// A zone's storage model.
@@ -91,9 +117,27 @@ pub struct AvailabilityZoneStatus {
 }
 
 impl AvailabilityZoneSpec {
+    /// The name of the zone's `ProviderClass`: its own, or `default` (the controller's
+    /// `--provider-class`) when it names none (ADR-0018 decision 1).
+    #[must_use]
+    pub fn provider_class<'a>(&'a self, default: &'a str) -> &'a str {
+        self.provider_class_ref
+            .as_ref()
+            .map_or(default, |r| r.name.as_str())
+    }
+
     /// Validates the spec, failing closed. Every refused field is reported.
     pub fn validate(&self) -> Result<(), Invalid> {
         let mut errs = Errors::default();
+        if let Some(r) = &self.provider_class_ref
+            && !is_dns_subdomain(&r.name)
+        {
+            errs.push(
+                "spec.providerClassRef.name",
+                REASON_INVALID_PROVIDER_CLASS_REF,
+                "not a valid object name",
+            );
+        }
         if self.storage.mode == StorageMode::Shared {
             errs.push(
                 "spec.storage.mode",
@@ -233,6 +277,39 @@ mod tests {
             .insert("topology.example.com/rack".to_string(), "r1".to_string());
         s.provider_labels.insert("tier".to_string(), String::new());
         assert_eq!(s.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_zone_that_names_no_class_uses_the_default() {
+        let s: AvailabilityZoneSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.provider_class_ref, None);
+        assert_eq!(s.provider_class("cloud-hypervisor"), "cloud-hypervisor");
+        assert_eq!(
+            serde_json::to_value(&s).unwrap().get("providerClassRef"),
+            None,
+            "a zone from before ADR-0018 keeps its exact shape"
+        );
+    }
+
+    #[test]
+    fn a_zone_that_names_a_class_uses_it() {
+        let s: AvailabilityZoneSpec =
+            serde_json::from_str(r#"{"providerClassRef": {"name": "libvirt"}}"#).unwrap();
+        assert_eq!(s.provider_class("cloud-hypervisor"), "libvirt");
+        assert_eq!(s.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_class_ref_that_is_not_an_object_name_is_refused() {
+        for name in ["", "Cloud_Hypervisor", "-ch"] {
+            let mut s = spec(StorageMode::Local);
+            s.provider_class_ref = Some(ProviderClassRef { name: name.into() });
+            assert_eq!(
+                s.validate().unwrap_err().reasons(),
+                vec![REASON_INVALID_PROVIDER_CLASS_REF],
+                "{name:?}"
+            );
+        }
     }
 
     #[test]

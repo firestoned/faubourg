@@ -311,13 +311,52 @@ not_halted() { rebootstraps_are 1 && ! condition_is "$other" BootstrapCurrent Fa
 eventually "deleting the failed Job lets the rollout go on" 60 not_halted
 kubectl delete host hv08 hv09 >/dev/null
 
-echo "--- the ProviderClass must be External"
+echo "--- the zone's class decides how its hosts are driven (ADR-0018)"
+zone_reason() { # zone, Ready reason
+  kubectl get availabilityzone "$1" -o json \
+    | jq -e --arg r "$2" '.status.conditions // [] | any(.type == "Ready" and .reason == $r)'
+}
 kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "Managed"}}' >/dev/null
 host hv05 az1 hv05.home.example Script
-eventually "a Managed class fails the Host" 30 phase_is hv05 Failed ProviderClassNotExternal
+eventually "a Managed cloud-hypervisor class fails the Host" 30 phase_is hv05 Failed ProviderBackendUnsupported
 never "and creates no Provider" 5 kubectl -n "$BANLIEUE" get provider hv05
+eventually "and the zone says so" 30 zone_reason az1 ProviderBackendUnsupported
 kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deployment": "External"}}' >/dev/null
+eventually "a class put right lets the Host through" 30 phase_is hv05 Pending AwaitingProviderIdentity
 kubectl delete host hv05 >/dev/null
+kubectl apply -f - >/dev/null <<'JSON'
+{"apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass", "metadata": {"name": "libvirt"},
+ "spec": {"backend": "libvirt", "image": {"repository": "registry.internal:5000/banlieue", "tag": "v0.0.0"}}}
+JSON
+kubectl apply -f - >/dev/null <<'JSON'
+{"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "AvailabilityZone",
+ "metadata": {"name": "az-kvm"}, "spec": {"providerClassRef": {"name": "libvirt"}}}
+JSON
+host hv14 az-kvm hv14.home.example None
+eventually "a host of a backend with no driver yet is refused" 30 phase_is hv14 Failed ProviderBackendUnsupported
+eventually "and so is its zone" 30 zone_reason az-kvm ProviderBackendUnsupported
+if out="$(kubectl patch availabilityzone az-kvm --type=merge \
+  -p '{"spec": {"providerClassRef": {"name": "cloud-hypervisor"}}}' 2>&1)"; then
+  fail "a zone's class is immutable" "changed"
+elif grep -qF "cannot change" <<<"$out"; then pass "a zone's class cannot change"
+else fail "a zone's class is immutable" "refused for another reason: $out"; fi
+if out="$(kubectl patch availabilityzone az-kvm --type=json \
+  -p '[{"op": "remove", "path": "/spec/providerClassRef"}]' 2>&1)"; then
+  fail "a zone's class cannot go" "removed"
+elif grep -qF "cannot change" <<<"$out"; then pass "nor be removed"
+else fail "a zone's class cannot go" "refused for another reason: $out"; fi
+kubectl delete host hv14 >/dev/null
+kubectl delete availabilityzone az-kvm >/dev/null
+
+echo "--- one machine, one Host (ADR-0018 decision 10)"
+host hv15 az1 hv15.home.example None
+host hv16 az1 hv15.home.example None
+eventually "two Hosts at one address both fail" 30 phase_is hv15 Failed DuplicateAddress
+eventually "the other too" 30 phase_is hv16 Failed DuplicateAddress
+kubectl patch host hv16 --type=merge -p '{"spec": {"address": "hv16.home.example"}}' >/dev/null
+eventually "moving one away frees the other" 30 phase_is hv15 Pending AwaitingProvider
+eventually "and itself" 30 phase_is hv16 Pending AwaitingProvider
+kubectl delete host hv15 hv16 >/dev/null
 
 echo "--- the zone gates the bootstrap"
 host hv02 az9 hv02.home.example Script

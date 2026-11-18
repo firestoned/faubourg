@@ -99,6 +99,7 @@ The zone controller writes each `AvailabilityZone`'s status from its hosts, and 
 | --- | --- | --- |
 | `StorageModeUnsupported` | False | `storage.mode: Shared` |
 | `InvalidSpec` | False | any other refused field |
+| `ProviderBackendUnsupported` | False | the zone's class is missing, or faubourg does not drive its backend in that mode ([ADR-0018](adr/0018-a-zone-names-its-provider-class.md)) |
 | `NoHosts` | False | no Host names the zone |
 | `NoReadyHost` | False | no member Host is `Ready` |
 | `AllReadyHostsCordoned` | False | every `Ready` member is cordoned |
