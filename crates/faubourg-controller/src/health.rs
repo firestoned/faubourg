@@ -4,14 +4,24 @@
 //! What a host's banlieue `Provider` says about the host (ADR-0007).
 //!
 //! faubourg adds no heartbeat of its own. A host is healthy while its `Provider` is
-//! `Ready=True` for the generation it carries **and** banlieue's operator reports its Lease
-//! heartbeat `Alive` (banlieue ADR-0102). Anything else, including a signal that is simply
-//! absent, is unhealthy: fail closed.
+//! `Ready=True` for the generation it carries **and** a second signal says the host itself is
+//! up (ADR-0018 decision 8):
+//!
+//! - an `External` provider runs on the host and renews its Lease there, so banlieue's
+//!   operator reporting that heartbeat `Alive` is the host's (banlieue ADR-0102);
+//! - a `Managed` provider runs in the cluster, so its Lease is a pod's. The host is up when the
+//!   provider reports `ProviderReachable=True` for the generation it carries.
+//!
+//! Anything else, including a signal that is simply absent, is unhealthy: fail closed.
 
-use banlieue_api::banlieue::{Heartbeat, Provider};
+use banlieue_api::banlieue::{Heartbeat, Provider, ProviderDeployment};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
 /// The `Provider` condition type faubourg reads.
 pub const CONDITION_READY: &str = "Ready";
+/// The condition a Managed provider sets when it reaches its endpoint (banlieue's
+/// `PROVIDER_REACHABLE`).
+pub const CONDITION_PROVIDER_REACHABLE: &str = "ProviderReachable";
 
 /// A host's health as its `Provider` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +32,8 @@ pub enum ProviderHealth {
     NotReady,
     /// `Ready=True`, but the heartbeat is `Stale`, `Absent`, or not yet evaluated.
     NoHeartbeat,
+    /// `Ready=True`, but a Managed provider does not report reaching the host.
+    Unreachable,
     /// More than one `Provider` carries the host's label (ADR-0009 decision 5).
     Ambiguous,
     /// `Ready=True` and the heartbeat is `Alive`.
@@ -32,15 +44,25 @@ impl ProviderHealth {
     /// Reads the `Provider`s labelled with a host's name: none is [`Self::Missing`], more
     /// than one is [`Self::Ambiguous`]. faubourg never picks one of several.
     pub fn of_labelled(providers: &[Provider]) -> Self {
+        Self::of_labelled_as(providers, ProviderDeployment::External)
+    }
+
+    /// [`Self::of_labelled`], for a provider deployed as `mode`.
+    pub fn of_labelled_as(providers: &[Provider], mode: ProviderDeployment) -> Self {
         match providers {
             [] => Self::Missing,
-            [one] => Self::of(Some(one)),
+            [one] => Self::of_as(Some(one), mode),
             _ => Self::Ambiguous,
         }
     }
 
-    /// Reads a host's `Provider`, or its absence.
+    /// Reads a host's `Provider`, or its absence, for a provider that runs on the host.
     pub fn of(provider: Option<&Provider>) -> Self {
+        Self::of_as(provider, ProviderDeployment::External)
+    }
+
+    /// Reads a host's `Provider`, or its absence, for a provider deployed as `mode`.
+    pub fn of_as(provider: Option<&Provider>, mode: ProviderDeployment) -> Self {
         let Some(p) = provider else {
             return Self::Missing;
         };
@@ -48,17 +70,21 @@ impl ProviderHealth {
             return Self::NotReady;
         };
         let generation = p.metadata.generation;
-        let ready = status.conditions.iter().any(|c| {
-            c.type_ == CONDITION_READY
-                && c.status == "True"
-                && match (c.observed_generation, generation) {
-                    // A condition written for an older spec says nothing about this one.
-                    (Some(observed), Some(current)) => observed >= current,
-                    _ => true,
-                }
-        });
-        if !ready {
+        let is_true = |type_: &str| {
+            status
+                .conditions
+                .iter()
+                .any(|c| c.type_ == type_ && current_and_true(c, generation))
+        };
+        if !is_true(CONDITION_READY) {
             return Self::NotReady;
+        }
+        if mode == ProviderDeployment::Managed {
+            return if is_true(CONDITION_PROVIDER_REACHABLE) {
+                Self::Healthy
+            } else {
+                Self::Unreachable
+            };
         }
         let heartbeat = status.workload.as_ref().and_then(|w| w.heartbeat);
         if heartbeat == Some(Heartbeat::Alive) {
@@ -72,6 +98,16 @@ impl ProviderHealth {
     pub fn is_healthy(self) -> bool {
         self == Self::Healthy
     }
+}
+
+/// `True`, and written for the Provider's current generation: a condition written for an older
+/// spec says nothing about this one.
+fn current_and_true(c: &Condition, generation: Option<i64>) -> bool {
+    c.status == "True"
+        && match (c.observed_generation, generation) {
+            (Some(observed), Some(current)) => observed >= current,
+            _ => true,
+        }
 }
 
 #[cfg(test)]
@@ -180,12 +216,58 @@ mod tests {
         }
     }
 
+    fn managed(generation: i64, conditions: &[Value]) -> Provider {
+        // A Managed provider's Lease is a pod's: Alive says nothing about the host.
+        provider(
+            generation,
+            Some(json!({ "conditions": conditions,
+                         "workload": { "namespace": "banlieue-system", "heartbeat": "Alive" } })),
+        )
+    }
+
+    fn reachable(status: &str, observed_generation: i64) -> Value {
+        let mut c = ready(status, Some(observed_generation));
+        c["type"] = json!("ProviderReachable");
+        c
+    }
+
+    #[test]
+    fn a_managed_provider_is_healthy_when_ready_and_reaching_its_host() {
+        let p = managed(2, &[ready("True", Some(2)), reachable("True", 2)]);
+        assert_eq!(
+            ProviderHealth::of_as(Some(&p), ProviderDeployment::Managed),
+            ProviderHealth::Healthy
+        );
+    }
+
+    #[test]
+    fn a_managed_provider_that_does_not_reach_its_host_is_unreachable_whatever_its_lease() {
+        for conditions in [
+            vec![ready("True", Some(2))],
+            vec![ready("True", Some(2)), reachable("False", 2)],
+            vec![ready("True", Some(2)), reachable("True", 1)],
+        ] {
+            let p = managed(2, &conditions);
+            assert_eq!(
+                ProviderHealth::of_as(Some(&p), ProviderDeployment::Managed),
+                ProviderHealth::Unreachable,
+                "{conditions:?}"
+            );
+        }
+        let p = managed(2, &[ready("False", Some(2)), reachable("True", 2)]);
+        assert_eq!(
+            ProviderHealth::of_as(Some(&p), ProviderDeployment::Managed),
+            ProviderHealth::NotReady
+        );
+    }
+
     #[test]
     fn only_healthy_is_healthy() {
         for h in [
             ProviderHealth::Missing,
             ProviderHealth::NotReady,
             ProviderHealth::NoHeartbeat,
+            ProviderHealth::Unreachable,
         ] {
             assert!(!h.is_healthy(), "{h:?}");
         }

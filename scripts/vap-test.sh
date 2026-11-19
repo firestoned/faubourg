@@ -111,6 +111,11 @@ AS=(--as="$CTL")
 
 echo "--- the builder's Job"
 admit "the controller's own Job is admitted" "$GOOD" "${AS[@]}"
+MANAGED="$(cd "$ROOT" && FAUBOURG_BOOTSTRAP_IMAGE="$IMAGE" FAUBOURG_SCRIPT_SOURCES="$SOURCES" \
+  FAUBOURG_MANAGED_BACKEND=true cargo run -q -p faubourg-controller --example bootstrap-job \
+  | jq -c 'del(.metadata.ownerReferences)')"
+admit "a Managed backend's Job, with no token and no API access, is admitted (ADR-0018)" \
+  "$MANAGED" "${AS[@]}"
 
 echo "--- image and command"
 deny "an image by tag" "digest-pinned bootstrap image" "$(mut "$C.image = \"registry.k8s.io/pause:3.10\"")" "${AS[@]}"
@@ -369,6 +374,52 @@ expect_boot no "the bootstrap pods read their own credentials" get secrets -n "$
 expect_boot no "the bootstrap pods mint tokens elsewhere" create serviceaccounts --subresource=token -n "$CREDS"
 expect_can no "the controller mints a token" create serviceaccounts --subresource=token -n banlieue-system
 expect_can yes "the controller creates Providers" create providers.banlieue.io -n banlieue-system
+
+echo "--- the Provider connection policy (ADR-0018 decision 6)"
+kubectl apply -f "$ROOT/deploy/admission/provider-connection-policy.yaml" >/dev/null
+provider_json() { # name, connection JSON
+  jq -nc --arg n "$1" --argjson c "$2" '{apiVersion: "banlieue.io/v1alpha1", kind: "Provider",
+    metadata: {name: $n, namespace: "banlieue-system"},
+    spec: {providerClassRef: {name: "libvirt"}, connection: $c}}'
+}
+EP='"endpoint": "qemu+tls://kvm01.home.example/system"'
+OKCA='"caBundle": {"configMapRef": {"name": "faubourg-kvm-ca", "key": "ca.crt"}}'
+OKCRED='"credentialsRef": {"name": "faubourg-kvm-client"}'
+# The binding takes a moment to take effect: wait until a foreign credential is refused.
+for _ in $(seq 1 60); do
+  submit "$(provider_json kvm00 "{$EP, \"credentialsRef\": {\"name\": \"x\"}}")" "${AS[@]}" \
+    >/dev/null 2>&1 || break
+  sleep 1
+done
+admit "the controller writes a faubourg- credential and CA" \
+  "$(provider_json kvm01 "{$EP, $OKCRED, $OKCA}")" "${AS[@]}"
+admit "and a connection with neither (a host-resident provider)" \
+  "$(provider_json hv01 '{"endpoint": "ch://hv01.home.example"}')" "${AS[@]}"
+deny "another Provider's credential" "credential named faubourg-" \
+  "$(provider_json kvm01 "{$EP, \"credentialsRef\": {\"name\": \"vsphere-creds\"}, $OKCA}")" "${AS[@]}"
+deny "an inline CA" "CA only from a ConfigMap" \
+  "$(provider_json kvm01 "{$EP, $OKCRED, \"caBundle\": {\"inline\": \"x\"}}")" "${AS[@]}"
+deny "a CA from a Secret" "CA only from a ConfigMap" \
+  "$(provider_json kvm01 "{$EP, $OKCRED, \"caBundle\": {\"secretRef\": {\"name\": \"faubourg-x\"}}}")" "${AS[@]}"
+deny "a CA from a ConfigMap not named for faubourg" "CA only from a ConfigMap" \
+  "$(provider_json kvm01 "{$EP, $OKCRED, \"caBundle\": {\"configMapRef\": {\"name\": \"kube-root-ca.crt\"}}}")" "${AS[@]}"
+deny "insecureSkipTLSVerify" "never sets insecureSkipTLSVerify" \
+  "$(provider_json kvm01 "{$EP, $OKCRED, $OKCA, \"insecureSkipTLSVerify\": true}")" "${AS[@]}"
+admit "the policy binds only the controller (cluster-admin writes any connection)" \
+  "$(provider_json kvm01 "{$EP, \"credentialsRef\": {\"name\": \"vsphere-creds\"}}")"
+# An adopted Provider, its connection the operator's: faubourg may label it, not repoint it.
+provider_json kvm02 "{$EP, \"credentialsRef\": {\"name\": \"kvm02-creds\"}}" | kubectl apply -f - >/dev/null
+patch_as_ctl() { kubectl -n banlieue-system patch provider kvm02 --dry-run=server --as="$CTL" --type=merge -p "$1" 2>&1; }
+if out="$(patch_as_ctl '{"metadata": {"labels": {"faubourg.firestoned.io/host": "kvm02"}}}')"; then
+  pass "the controller labels an adopted Provider whose credential is the operator's"
+else fail "labelling an adopted Provider" "refused: $out"; fi
+if out="$(patch_as_ctl '{"spec": {"connection": {"credentialsRef": {"name": "other-creds"}}}}')"; then
+  fail "repointing an adopted Provider" "admitted"
+elif grep -qF "credential named faubourg-" <<<"$out"; then
+  pass "but cannot repoint it at another credential"
+else fail "repointing an adopted Provider" "refused for another reason: $out"; fi
+expect_can yes "the controller patches Providers (the policy, not RBAC, bounds the connection)" \
+  patch providers.banlieue.io -n banlieue-system
 
 echo "--- a real Job and its pod"
 if out="$(kubectl create -f - "${AS[@]}" <<<"$GOOD" 2>&1)"; then

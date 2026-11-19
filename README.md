@@ -9,9 +9,12 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![FINOS CALM](https://img.shields.io/badge/FINOS_CALM-1.37-blue)](https://calm.finos.org/)
 
-A control plane that groups bare-metal [Cloud Hypervisor](https://www.cloudhypervisor.org/)
-hosts into availability zones for [banlieue](https://github.com/firestoned/banlieue), the way
-vCenter groups ESXi hosts into clusters.
+A control plane that groups bare-metal hosts into availability zones for
+[banlieue](https://github.com/firestoned/banlieue), the way vCenter groups ESXi hosts into
+clusters. A zone's hosts are [Cloud Hypervisor](https://www.cloudhypervisor.org/) hosts or
+libvirt hosts, by the banlieue ProviderClass the zone names
+([ADR-0018](docs/adr/0018-a-zone-names-its-provider-class.md)); each host is one banlieue
+failure domain.
 
 **Documentation: <https://firestoned.github.io/faubourg/>**
 
@@ -78,6 +81,7 @@ exists; read its accepted risks before deploying, and expect the API to change b
 | A run against a real hypervisor | done: one host adopted, then bootstrapped from nothing ([roadmap 01](.github/community/01-host-controller-and-bootstrap.md)) |
 | Zone controller ([ADR-0015](docs/adr/0015-zone-controller.md)) and cordon | implemented: zone health, and a cordon banlieue enforces (banlieue v0.5.3 and later), tested on kind ([roadmap 02](.github/community/02-zone-health-and-cordon.md)) |
 | Host drain through banlieue VM moves ([ADR-0017](docs/adr/0017-host-drain-moves-vms-through-banlieue.md)) | implemented on faubourg's side, tested on kind: `maintenance: Drain` cordons the host and asks banlieue to move its VMs one at a time, reporting `Drained`; a zone reports `HostsMatch`; member Providers carry `banlieue.io/zone`. Moves happen once banlieue's mover ships (its ADR-0127 Stage 1) ([roadmap 03](.github/community/03-host-drain-and-vm-moves.md)) |
+| Provider-agnostic zones ([ADR-0018](docs/adr/0018-a-zone-names-its-provider-class.md)) | implemented for Cloud Hypervisor and libvirt, tested on kind: a zone names its ProviderClass; libvirt Providers get the zone's `faubourg-` client credential, bounded by an admission policy; a libvirt bootstrap mints nothing; health from `ProviderReachable`. Firecracker waits for banlieue ([roadmap 04](.github/community/04-provider-agnostic-zones.md)) |
 | CI and docs site | [build](.github/workflows/build.yaml), [CALM](.github/workflows/calm.yaml), [docs](.github/workflows/docs.yaml), [CodeQL](.github/workflows/codeql.yaml), [SAST](.github/workflows/sast.yaml), [Scorecard](.github/workflows/scorecard.yaml) |
 
 The status board is [`ROADMAPS.md`](ROADMAPS.md).

@@ -22,6 +22,15 @@ pub const REASON_RESERVED_LABEL: &str = "ReservedLabel";
 pub const REASON_INVALID_LABEL: &str = "InvalidLabel";
 /// Condition reason when `providerClassRef.name` is not a valid object name.
 pub const REASON_INVALID_PROVIDER_CLASS_REF: &str = "InvalidProviderClassRef";
+/// Condition reason when a `libvirt` reference is not a `faubourg-` object name, or its key is
+/// not a valid `ConfigMap` key (ADR-0018 decision 6).
+pub const REASON_INVALID_LIBVIRT_REF: &str = "InvalidLibvirtRef";
+/// The prefix every object a zone points banlieue's libvirt provider at must carry: only what
+/// an operator named for faubourg (ADR-0018 decision 6). The Provider connection admission
+/// policy enforces the same prefix on what the controller writes.
+pub const CONNECTION_PREFIX: &str = "faubourg-";
+/// The default key of the CA bundle in its `ConfigMap`, as banlieue defaults it.
+pub const DEFAULT_CA_KEY: &str = "ca.crt";
 
 /// The CEL rule keeping a zone's class once it is set (ADR-0018 decision 3). Setting it on a
 /// zone that named none is allowed: a member whose Provider has another class is refused
@@ -67,6 +76,43 @@ pub struct AvailabilityZoneSpec {
     /// `--provider-class`. It cannot change or be removed once set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_class_ref: Option<ProviderClassRef>,
+    /// How banlieue's libvirt provider reaches the zone's hosts (ADR-0018 decision 6). Required
+    /// for a zone whose class has backend `libvirt`, refused for any other. Both objects live in
+    /// banlieue's namespace, are made by the operator, and are named `faubourg-...`; faubourg
+    /// copies their names into each member's Provider and never reads them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libvirt: Option<LibvirtConnection>,
+}
+
+/// A libvirt zone's connection: one client credential and one CA for all its hosts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LibvirtConnection {
+    /// The Secret holding the client certificate (`tls.crt`, `tls.key`) libvirtd accepts.
+    pub credentials_ref: ObjectName,
+    /// The `ConfigMap` key holding the CA that signed each host's libvirtd certificate.
+    pub ca_bundle_ref: ConfigMapKey,
+}
+
+/// An object in banlieue's namespace, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ObjectName {
+    /// The object's name. Must start with `faubourg-`.
+    pub name: String,
+}
+
+/// A key of a `ConfigMap` in banlieue's namespace.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigMapKey {
+    /// The `ConfigMap`'s name. Must start with `faubourg-`.
+    pub name: String,
+    /// The key.
+    #[serde(default = "default_ca_key")]
+    pub key: String,
+}
+
+fn default_ca_key() -> String {
+    DEFAULT_CA_KEY.to_string()
 }
 
 /// A banlieue `ProviderClass`, by name. Cluster-scoped, so no namespace.
@@ -145,6 +191,27 @@ impl AvailabilityZoneSpec {
                 "Shared storage is not supported in v1; use Local (ADR-0004)",
             );
         }
+        if let Some(l) = &self.libvirt {
+            for (field, name) in [
+                ("spec.libvirt.credentialsRef.name", &l.credentials_ref.name),
+                ("spec.libvirt.caBundleRef.name", &l.ca_bundle_ref.name),
+            ] {
+                if !is_dns_subdomain(name) || !name.starts_with(CONNECTION_PREFIX) {
+                    errs.push(
+                        field,
+                        REASON_INVALID_LIBVIRT_REF,
+                        format!("not an object name starting with {CONNECTION_PREFIX}"),
+                    );
+                }
+            }
+            if !is_config_map_key(&l.ca_bundle_ref.key) {
+                errs.push(
+                    "spec.libvirt.caBundleRef.key",
+                    REASON_INVALID_LIBVIRT_REF,
+                    "not a valid ConfigMap key",
+                );
+            }
+        }
         for (k, v) in &self.provider_labels {
             let field = format!("spec.providerLabels[{k}]");
             // A zone cannot cordon its hosts behind faubourg's back: banlieue's cordon
@@ -169,6 +236,16 @@ impl AvailabilityZoneSpec {
         }
         errs.finish()
     }
+}
+
+/// A `ConfigMap` key: up to 253 of `[-._a-zA-Z0-9]`, and not `.` or `..`.
+fn is_config_map_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 253
+        && k != "."
+        && k != ".."
+        && k.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
 }
 
 /// A Kubernetes label key: optional DNS-subdomain prefix and `/`, then a name segment.
@@ -309,6 +386,57 @@ mod tests {
                 vec![REASON_INVALID_PROVIDER_CLASS_REF],
                 "{name:?}"
             );
+        }
+    }
+
+    fn libvirt(credentials: &str, ca: &str, key: &str) -> AvailabilityZoneSpec {
+        let mut s = spec(StorageMode::Local);
+        s.libvirt = Some(LibvirtConnection {
+            credentials_ref: ObjectName {
+                name: credentials.into(),
+            },
+            ca_bundle_ref: ConfigMapKey {
+                name: ca.into(),
+                key: key.into(),
+            },
+        });
+        s
+    }
+
+    #[test]
+    fn a_libvirt_connection_names_faubourg_objects() {
+        assert_eq!(
+            libvirt("faubourg-kvm-client", "faubourg-kvm-ca", "ca.crt").validate(),
+            Ok(())
+        );
+        let s: AvailabilityZoneSpec = serde_json::from_str(
+            r#"{"libvirt": {"credentialsRef": {"name": "faubourg-c"}, "caBundleRef": {"name": "faubourg-ca"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.libvirt.unwrap().ca_bundle_ref.key, DEFAULT_CA_KEY);
+    }
+
+    #[test]
+    fn a_libvirt_connection_to_anything_else_is_refused() {
+        // Another Provider's credential, banlieue's own, or no name at all (decision 6).
+        for (credentials, ca) in [
+            ("vsphere-creds", "faubourg-ca"),
+            ("faubourg-c", "kube-root-ca.crt"),
+            ("", "faubourg-ca"),
+            ("faubourg-Bad", "faubourg-ca"),
+        ] {
+            let err = libvirt(credentials, ca, "ca.crt").validate().unwrap_err();
+            assert_eq!(
+                err.reasons(),
+                vec![REASON_INVALID_LIBVIRT_REF],
+                "{credentials} {ca}"
+            );
+        }
+        for key in ["", "..", "a/b"] {
+            let err = libvirt("faubourg-c", "faubourg-ca", key)
+                .validate()
+                .unwrap_err();
+            assert_eq!(err.reasons(), vec![REASON_INVALID_LIBVIRT_REF], "{key:?}");
         }
     }
 

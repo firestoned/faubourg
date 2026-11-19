@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use banlieue_api::banlieue::Provider;
 
-use crate::backend::{Backend, REASON_BACKEND_UNSUPPORTED};
+use crate::backend::{Backend, REASON_BACKEND_UNSUPPORTED, REASON_CONNECTION_INVALID};
 use faubourg_api::LABEL_HOST;
 use faubourg_api::host::{Host, HostPhase};
 use faubourg_api::zone::{
@@ -248,8 +248,13 @@ fn decide(
         return (false, reason, invalid.to_string());
     }
     // A class faubourg does not drive: its hosts are all refused (ADR-0018 decision 2).
-    if let Err(why) = backend {
-        return (false, REASON_BACKEND_UNSUPPORTED, why.clone());
+    match backend {
+        Err(why) => return (false, REASON_BACKEND_UNSUPPORTED, why.clone()),
+        Ok(b) => {
+            if let Err(why) = b.check_zone(Some(zone)) {
+                return (false, REASON_CONNECTION_INVALID, why);
+            }
+        }
     }
     if members == 0 {
         return (false, REASON_NO_HOSTS, "no Host names this zone".into());
@@ -351,6 +356,29 @@ mod tests {
             &at(1),
         );
         assert_eq!(ready(&s), ("False", REASON_STORAGE_MODE_UNSUPPORTED));
+    }
+
+    #[test]
+    fn a_zone_whose_connection_does_not_fit_its_backend_is_not_ready() {
+        let hosts = [host("hv01", "az1", Some(HostPhase::Ready), false)];
+        // A libvirt zone without spec.libvirt.
+        let s = status(
+            &zone(StorageMode::Local),
+            &hosts,
+            &[],
+            &Ok(Backend::Libvirt),
+            &at(1),
+        );
+        assert_eq!(ready(&s), ("False", REASON_CONNECTION_INVALID));
+        // A cloud-hypervisor zone with one.
+        let mut z = zone(StorageMode::Local);
+        z.spec.libvirt = serde_json::from_value(serde_json::json!({
+            "credentialsRef": { "name": "faubourg-c" }, "caBundleRef": { "name": "faubourg-ca" } }))
+        .unwrap();
+        let s = status(&z, &hosts, &[], &DRIVEN, &at(1));
+        assert_eq!(ready(&s), ("False", REASON_CONNECTION_INVALID));
+        let s = status(&z, &hosts, &[], &Ok(Backend::Libvirt), &at(1));
+        assert_eq!(ready(&s), ("True", REASON_HOSTS_READY));
     }
 
     fn ready(s: &AvailabilityZoneStatus) -> (&str, &str) {

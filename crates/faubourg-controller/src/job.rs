@@ -188,11 +188,24 @@ pub fn is_digest_pinned(image: &str) -> bool {
     })
 }
 
-/// Builds the bootstrap Job for the Host's current generation.
+/// Builds the bootstrap Job for the Host's current generation, for a provider that runs on the
+/// host: the Job mints its first token (ADR-0011).
 pub fn bootstrap_job(
     host: &Host,
     cfg: &BootstrapConfig,
     policy: Option<&Policy>,
+) -> Result<Job, JobError> {
+    bootstrap_job_for(host, cfg, policy, true)
+}
+
+/// Builds the bootstrap Job for the Host's current generation. With `mints_token` false (a
+/// Managed backend, ADR-0018 decision 7) the Job carries no provider variables, no `kube-api`
+/// volume and no provider CA: the bootstrap mints nothing and sends the script nothing.
+pub fn bootstrap_job_for(
+    host: &Host,
+    cfg: &BootstrapConfig,
+    policy: Option<&Policy>,
+    mints_token: bool,
 ) -> Result<Job, JobError> {
     let spec = &host.spec;
     if spec.bootstrap.method != BootstrapMethod::Script {
@@ -226,7 +239,11 @@ pub fn bootstrap_job(
         .or(cfg.default_script.as_ref())
         .ok_or(JobError::NoScriptSource)?;
     let digest = pinned(policy, script)?;
-    let provider_ca = policy.and_then(|p| p.provider_ca.as_ref());
+    // The provider CA is written into the host's kubeconfig, so it matters only to a host that
+    // gets one (ADR-0016).
+    let provider_ca = policy
+        .and_then(|p| p.provider_ca.as_ref())
+        .filter(|_| mints_token);
     // validate() refuses Script without ssh, so this cannot fail; fail closed regardless.
     let ssh = spec.ssh.as_ref().ok_or(JobError::NotPersisted("ssh"))?;
     let inputs = inputs_hash(
@@ -247,17 +264,18 @@ pub fn bootstrap_job(
     .collect();
 
     let mut env = environment(name, &spec.address, ssh, host.status.as_ref());
-    env.extend([
-        literal(ENV_SCRIPT_SHA256, digest),
-        literal(ENV_PROVIDER, name),
-        literal(ENV_PROVIDER_NAMESPACE, &cfg.provider.namespace),
-        literal(ENV_PROVIDER_API_SERVER, &cfg.provider.api_server),
-    ]);
-
+    env.push(literal(ENV_SCRIPT_SHA256, digest));
+    if mints_token {
+        env.extend([
+            literal(ENV_PROVIDER, name),
+            literal(ENV_PROVIDER_NAMESPACE, &cfg.provider.namespace),
+            literal(ENV_PROVIDER_API_SERVER, &cfg.provider.api_server),
+        ]);
+    }
     if let Some(ca) = provider_ca {
         env.push(literal(ENV_PROVIDER_CA_SHA256, &ca.sha256));
     }
-    let (volumes, mounts) = volumes_and_mounts(ssh, script, provider_ca);
+    let (volumes, mounts) = volumes_and_mounts(ssh, script, provider_ca, mints_token);
 
     let pod = pod_spec(
         container(&cfg.image, env, mounts),
@@ -317,12 +335,25 @@ pub fn bootstrap_inputs(
     default_script: Option<&ScriptRef>,
     policy: Option<&Policy>,
 ) -> Option<String> {
+    bootstrap_inputs_for(spec, default_script, policy, true)
+}
+
+/// [`bootstrap_inputs`], for a backend that does or does not mint a token: a host that gets no
+/// kubeconfig is not re-bootstrapped when the provider CA is re-pinned.
+pub fn bootstrap_inputs_for(
+    spec: &HostSpec,
+    default_script: Option<&ScriptRef>,
+    policy: Option<&Policy>,
+    mints_token: bool,
+) -> Option<String> {
     if spec.bootstrap.method != BootstrapMethod::Script {
         return None;
     }
     let script = spec.bootstrap.script_ref.as_ref().or(default_script)?;
     let digest = pinned(policy, script).ok()?;
-    let provider_ca = policy.and_then(|p| p.provider_ca.as_ref());
+    let provider_ca = policy
+        .and_then(|p| p.provider_ca.as_ref())
+        .filter(|_| mints_token);
     Some(inputs_hash(
         &spec.address,
         spec.ssh.as_ref()?,
@@ -628,12 +659,13 @@ fn secret_volume(volume: &str, secret: &str) -> Volume {
 }
 
 /// The Job's volumes and the container's read-only mounts of them: the credentials, the
-/// placement credential if any, the script, the provider CA if pinned (ADR-0016), and the pod's
-/// own `kube-api` access.
+/// placement credential if any, the script, the provider CA if pinned (ADR-0016), and, when it
+/// mints the host's token, the pod's own `kube-api` access.
 fn volumes_and_mounts(
     ssh: &SshSpec,
     script: &ScriptRef,
     provider_ca: Option<&PinnedScript>,
+    mints_token: bool,
 ) -> (Vec<Volume>, Vec<VolumeMount>) {
     let mut volumes = vec![secret_volume(VOLUME_CREDENTIALS, &ssh.secret_ref.name)];
     let mut mounts = vec![read_only(VOLUME_CREDENTIALS, MOUNT_CREDENTIALS)];
@@ -647,8 +679,10 @@ fn volumes_and_mounts(
         volumes.push(provider_ca_volume(&ca.source));
         mounts.push(read_only(VOLUME_PROVIDER_CA, MOUNT_PROVIDER_CA));
     }
-    volumes.push(kube_api_volume());
-    mounts.push(read_only(VOLUME_KUBE_API, MOUNT_KUBE_API));
+    if mints_token {
+        volumes.push(kube_api_volume());
+        mounts.push(read_only(VOLUME_KUBE_API, MOUNT_KUBE_API));
+    }
     (volumes, mounts)
 }
 
@@ -1467,6 +1501,50 @@ mod tests {
             "none without a pin"
         );
         assert!(!env(&plain).contains_key(ENV_PROVIDER_CA_SHA256));
+    }
+
+    #[test]
+    fn a_job_for_a_managed_backend_mints_nothing_and_mounts_no_api_access() {
+        // ADR-0018 decision 7: no token, no kubeconfig, so no API access and no provider CA.
+        let j = bootstrap_job_for(&host(), &cfg(), Some(&with_ca()), false).unwrap();
+        assert!(volume(&j, VOLUME_KUBE_API).is_none());
+        assert!(volume(&j, VOLUME_PROVIDER_CA).is_none());
+        let e = env(&j);
+        for k in [
+            ENV_PROVIDER,
+            ENV_PROVIDER_NAMESPACE,
+            ENV_PROVIDER_API_SERVER,
+            ENV_PROVIDER_CA_SHA256,
+        ] {
+            assert!(!e.contains_key(k), "{k}");
+        }
+        assert!(
+            e.contains_key(ENV_SCRIPT_SHA256),
+            "the script is still pinned"
+        );
+        assert!(volume(&j, VOLUME_CREDENTIALS).is_some());
+        assert!(volume(&j, VOLUME_SCRIPT).is_some());
+        let pod = j.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert_eq!(pod.automount_service_account_token, Some(false));
+        assert_eq!(
+            bootstrap_job_for(&host(), &cfg(), Some(&with_ca()), true).unwrap(),
+            bootstrap_job(&host(), &cfg(), Some(&with_ca())).unwrap(),
+            "bootstrap_job is the token-minting form"
+        );
+    }
+
+    #[test]
+    fn a_provider_ca_re_pin_does_not_re_bootstrap_a_host_that_gets_no_kubeconfig() {
+        let h = host();
+        let script = cfg().default_script;
+        assert_eq!(
+            bootstrap_inputs_for(&h.spec, script.as_ref(), Some(&with_ca()), false),
+            bootstrap_inputs_for(&h.spec, script.as_ref(), Some(&policy(pins())), false),
+        );
+        assert_ne!(
+            bootstrap_inputs_for(&h.spec, script.as_ref(), Some(&with_ca()), true),
+            bootstrap_inputs_for(&h.spec, script.as_ref(), Some(&policy(pins())), true),
+        );
     }
 
     #[test]

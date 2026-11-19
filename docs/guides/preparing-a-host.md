@@ -188,8 +188,8 @@ For a bootstrapped Host, faubourg creates the `Provider` itself, named after the
 banlieue's namespace, of its zone's class: the zone's `providerClassRef`, or the controller's
 `--provider-class` (default `cloud-hypervisor`) when the zone names none
 ([ADR-0018](../adr/0018-a-zone-names-its-provider-class.md)). faubourg drives a class whose
-`backend` is `cloud-hypervisor` and whose `deployment` is `External`; any other class fails the
-zone's Hosts with `ProviderBackendUnsupported`. A Host whose existing `Provider` references
+`backend` is `cloud-hypervisor` and whose `deployment` is `External`, or `libvirt` and `Managed`
+(below); any other class fails the zone's Hosts with `ProviderBackendUnsupported`. A Host whose existing `Provider` references
 another class than its zone's is `ProviderClassMismatch`, and faubourg leaves that `Provider`
 alone. Two Hosts with the same `address` (compared as written, ignoring the case of an IPv6 address's hex digits, never resolved)
 are both `DuplicateAddress`: one machine is one Host. banlieue's operator then creates its
@@ -205,3 +205,34 @@ Secret holds it.
 A replacement install script must read the bundle from stdin (format in ADR-0011 decision 9),
 or install the credential some other way. A host that stays down longer than its token's
 lifetime is recovered by re-bootstrapping it: delete its Job.
+
+## A libvirt host
+
+A zone whose class has backend `libvirt` holds hosts that run libvirtd and no banlieue process:
+banlieue's libvirt provider runs in the cluster and dials each host over mutual TLS on 16514
+([ADR-0018](../adr/0018-a-zone-names-its-provider-class.md)). The same Job, script path and sudo
+rule prepare the host; what differs:
+
+- **The zone names a client credential.** `spec.libvirt.credentialsRef` is a Secret in
+  banlieue's namespace with the client certificate (`tls.crt`, `tls.key`), and
+  `spec.libvirt.caBundleRef` a ConfigMap key with the CA that signed each host's libvirtd
+  certificate. Both are yours to make, both are named `faubourg-...`, and faubourg copies their
+  names into each host's `Provider` without reading them. An admission policy,
+  `faubourg-provider-connection`, refuses any other name from faubourg's controller. See
+  [`examples/03-libvirt-zone.yaml`](https://github.com/firestoned/faubourg/blob/main/examples/03-libvirt-zone.yaml).
+- **The Provider** is `qemu+tls://<address>/system`, with the zone's credential and CA. Its
+  class must be `Managed`.
+- **No token.** The Job mints nothing, mounts no API access and sends the script nothing on its
+  standard input, and is created without waiting for banlieue to give the Provider an identity.
+- **The script** is
+  [`examples/host/install-libvirt.sh`](https://github.com/firestoned/faubourg/blob/main/examples/host/install-libvirt.sh):
+  it installs libvirtd and QEMU from the distribution's packages, checks that the host's server
+  certificate, key and CA are in libvirt's default paths, sets TLS with the client certificate
+  as the only credential, admits only the client DN you set in it, and enables libvirtd's TLS
+  socket (never plain TCP). It does not make the server certificate: that is per host, from your
+  PKI, or from a per-host copy of the script kept in a Secret. Set `CLIENT_DN` before pinning it.
+- **Health** is the provider's `ProviderReachable`, not its heartbeat, which is a pod's.
+- **Drain** cordons the host and reports `MovesUnsupported`: banlieue moves no libvirt VM.
+
+One machine is one Host, so a machine is either a Cloud Hypervisor host or a libvirt host in
+faubourg, never both.

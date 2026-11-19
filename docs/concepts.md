@@ -73,7 +73,10 @@ stateDiagram-v2
   or unsupported.
 - **Bootstrapping:** the per-host Job is running.
 - **Ready:** the Job succeeded *and* the host's `Provider` is `Ready=True` with a heartbeat of
-  `Alive`. Success is the provider coming up, not an exit code.
+  `Alive`. Success is the provider coming up, not an exit code. A libvirt host's provider runs
+  in the cluster, so its heartbeat is a pod's: such a host is `Ready` when its `Provider` is
+  `Ready=True` and `ProviderReachable=True` ([ADR-0018](adr/0018-a-zone-names-its-provider-class.md)
+  decision 8), and `Degraded`, `ProviderUnreachable`, when the provider stops reaching it.
 - **Degraded:** was ready, and the `Provider` stopped being ready or its heartbeat went
   `Stale` or `Absent`. faubourg never deletes a `Provider` because of this, since banlieue
   already stops placing on a stale provider.
@@ -100,6 +103,7 @@ The zone controller writes each `AvailabilityZone`'s status from its hosts, and 
 | `StorageModeUnsupported` | False | `storage.mode: Shared` |
 | `InvalidSpec` | False | any other refused field |
 | `ProviderBackendUnsupported` | False | the zone's class is missing, or faubourg does not drive its backend in that mode ([ADR-0018](adr/0018-a-zone-names-its-provider-class.md)) |
+| `ProviderConnectionInvalid` | False | a `libvirt` zone without `spec.libvirt`, or another zone with one |
 | `NoHosts` | False | no Host names the zone |
 | `NoReadyHost` | False | no member Host is `Ready` |
 | `AllReadyHostsCordoned` | False | every `Ready` member is cordoned |
@@ -184,7 +188,7 @@ The Host's `Drained` condition says where it stands:
 | `True` | `Drained` | no VM is scheduled on the host |
 | `False` | `Draining` | moves are in flight, or waiting for the one slot |
 | `False` | `MovesBlocked` | banlieue would not move the VMs named in the message, with its reason |
-| `False` | `MovesUnsupported` | the cluster serves no `VirtualMachineMove` (banlieue older than v0.5.7) |
+| `False` | `MovesUnsupported` | the cluster serves no `VirtualMachineMove` (banlieue older than v0.5.7), or the host is not a Cloud Hypervisor host: banlieue moves no libvirt VM. The cordon still applies |
 | `False` | `HostNotReady` | the host's provider is not running; a move needs both hosts alive |
 | `False` | `ProviderUnknown` | the host has no single Provider, so its VMs cannot be found |
 

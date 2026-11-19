@@ -531,7 +531,9 @@ async fn plan_drain(
     p: &crate::plan::Plan,
 ) -> Result<(drain::DrainPlan, bool), Error> {
     let (moves, moves_served) = list_or_unserved(&ctx.moves, by_host).await?;
-    let (vms, vms_served) = if host.spec.maintenance == Maintenance::Drain {
+    // A backend banlieue cannot move needs no VM list: its drain moves nothing (ADR-0018).
+    let movable = p.backend.is_none_or(Backend::moves_vms);
+    let (vms, vms_served) = if host.spec.maintenance == Maintenance::Drain && movable {
         list_or_unserved(&ctx.vms, &ListParams::default()).await?
     } else {
         (Vec::new(), true)
@@ -541,6 +543,7 @@ async fn plan_drain(
         host_ready: p.decision.phase == HostPhase::Ready,
         provider: p.status.provider_ref.as_deref(),
         moves_served: moves_served && vms_served,
+        backend: p.backend,
         vms: &vms,
         moves: &moves,
     });

@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# A zone of libvirt hosts (ADR-0018). banlieue's libvirt provider runs in the cluster and dials
+# each host's libvirtd over mutual TLS on 16514, with one client certificate for the zone. Both
+# objects below live in banlieue's namespace, are made by you, and must be named faubourg-...:
+# faubourg copies their names into each host's Provider and never reads them. Placeholders
+# only; create the Secret with `kubectl create secret tls --cert --key`.
+#
+# The zone's class is a banlieue ProviderClass with backend libvirt and deployment Managed
+# (the default), for example:
+#
+#   apiVersion: banlieue.io/v1alpha1
+#   kind: ProviderClass
+#   metadata: { name: libvirt }
+#   spec:
+#     backend: libvirt
+#     image: { repository: ghcr.io/firestoned/banlieue, tag: v0.0.0 }
+#
+# Its hosts are prepared by examples/host/install-libvirt.sh, under the usual sudo rule.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: faubourg-kvm-client
+  namespace: banlieue-system
+type: kubernetes.io/tls
+stringData:
+  tls.crt: "<client certificate, PEM>"
+  tls.key: "<client key, PEM>"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: faubourg-kvm-ca
+  namespace: banlieue-system
+data:
+  ca.crt: "<the CA that signed each host's libvirtd certificate, PEM>"
+---
+apiVersion: faubourg.firestoned.io/v1alpha1
+kind: AvailabilityZone
+metadata:
+  name: kvm1
+spec:
+  description: Rack B, libvirt hosts
+  providerClassRef:
+    name: libvirt
+  libvirt:
+    credentialsRef:
+      name: faubourg-kvm-client
+    caBundleRef:
+      name: faubourg-kvm-ca
+      key: ca.crt
