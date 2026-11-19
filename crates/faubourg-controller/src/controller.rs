@@ -425,6 +425,7 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         peers: &peers,
         now: &now,
         drained: None,
+        provider_refused: None,
     };
     let p = plan(&world)?;
 
@@ -443,7 +444,23 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 
     // The Provider first: banlieue gives it its identity, and only then is a Job created. Its
     // spec before its labels, so the labels' apply never leaves a field without a manager.
-    apply_provider(&ctx, &name, &p, own_provider.is_some()).await?;
+    // A write the API server refuses (banlieue's admission, faubourg's own, or RBAC) fails the
+    // Host with the API server's reason: planned again with it, nothing else is done this pass,
+    // and the write is tried again after RETRY.
+    if let Err(refusal) = apply_provider(&ctx, &name, &p, own_provider.is_some()).await {
+        let Some(why) = refused_message(&refusal) else {
+            return Err(refusal);
+        };
+        warn!(host = %name, error = %refusal, "the API server refused the host's Provider");
+        let p = plan(&World {
+            provider_refused: Some(why),
+            ..world
+        })?;
+        if p.status_changed {
+            write_status(&ctx, &name, &host, &p).await?;
+        }
+        return Ok(Action::requeue(RETRY));
+    }
     for job in &p.delete {
         match ctx.jobs.delete(job, &DeleteParams::background()).await {
             Ok(_) => info!(host = %name, job = %job, "deleted stale bootstrap Job"),
@@ -464,30 +481,51 @@ async fn reconcile(host: Arc<Host>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     // After the Provider's labels: a drain cordons the host before any VM is asked to leave.
     apply_drain(&ctx, &name, &drain_plan).await?;
     if p.status_changed {
-        let patch = serde_json::json!({
-            "apiVersion": format!("{}/{}", faubourg_api::GROUP, faubourg_api::VERSION),
-            "kind": "Host",
-            "status": p.status,
-        });
-        ctx.hosts
-            .patch_status(
-                &name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Apply(&patch),
-            )
-            .await?;
-        info!(
-            host = %name,
-            zone = %host.spec.zone_ref,
-            phase = ?p.decision.phase,
-            reason = p.decision.reason,
-            "phase"
-        );
+        write_status(&ctx, &name, &host, &p).await?;
     }
     if draining || moves_left {
         return Ok(Action::requeue(DRAIN_RESYNC));
     }
     Ok(Action::requeue(RESYNC))
+}
+
+/// Writes the Host's status by server-side apply, and logs the phase.
+async fn write_status(
+    ctx: &Ctx,
+    name: &str,
+    host: &Host,
+    p: &crate::plan::Plan,
+) -> Result<(), Error> {
+    let patch = serde_json::json!({
+        "apiVersion": format!("{}/{}", faubourg_api::GROUP, faubourg_api::VERSION),
+        "kind": "Host",
+        "status": p.status,
+    });
+    ctx.hosts
+        .patch_status(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&patch),
+        )
+        .await?;
+    info!(
+        host = %name,
+        zone = %host.spec.zone_ref,
+        phase = ?p.decision.phase,
+        reason = p.decision.reason,
+        "phase"
+    );
+    Ok(())
+}
+
+/// The API server's message when it refused a write outright: forbidden (RBAC, or an admission
+/// policy whose reason is `Forbidden`) or invalid (an admission policy's default reason, or the
+/// schema). `None` for anything a retry could cure.
+fn refused_message(e: &Error) -> Option<&str> {
+    match e {
+        Error::Kube(kube::Error::Api(s)) if matches!(s.code, 403 | 422) => Some(s.message.as_str()),
+        _ => None,
+    }
 }
 
 /// Applies the host's Provider: its spec before its labels, so the labels' apply never leaves a
@@ -609,6 +647,24 @@ mod tests {
                           "ownerReferences": owners }
         }))
         .unwrap()
+    }
+
+    fn api_error(code: u16) -> Error {
+        Error::Kube(kube::Error::Api(
+            serde_json::from_value(json!({
+                "status": "Failure", "message": "denied request", "reason": "Forbidden",
+                "code": code }))
+            .unwrap(),
+        ))
+    }
+
+    #[test]
+    fn only_a_refusal_a_retry_cannot_cure_becomes_the_hosts_status() {
+        assert_eq!(refused_message(&api_error(403)), Some("denied request"));
+        assert_eq!(refused_message(&api_error(422)), Some("denied request"));
+        for code in [404, 409, 429, 500, 503] {
+            assert_eq!(refused_message(&api_error(code)), None, "{code}");
+        }
     }
 
     #[test]

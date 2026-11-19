@@ -22,4 +22,4 @@
 | [0015](0015-zone-controller.md) | The zone controller reports each zone's health from its hosts | Accepted (amended by ADR-0017) |
 | [0016](0016-provider-api-ca.md) | The CA hosts trust for the API server can be set, pinned by digest | Accepted |
 | [0017](0017-host-drain-moves-vms-through-banlieue.md) | Draining a host asks banlieue to move its VMs within the zone | Accepted (amended by ADR-0018) |
-| [0018](0018-a-zone-names-its-provider-class.md) | A zone names its provider class; Cloud Hypervisor, Firecracker and libvirt hosts | Accepted |
+| [0018](0018-a-zone-names-its-provider-class.md) | A zone names its provider class; Cloud Hypervisor, Firecracker and libvirt hosts | Accepted (amended 2026-11-19, waits on banlieue ADR-0157 for libvirt) |

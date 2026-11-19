@@ -79,7 +79,13 @@ need per-failure-domain labels and cordon in banlieue first.
       policy, a Job that mints nothing, health, drain). No separate `e2e-test` case: the image
       runs with no provider inputs in `bootstrap-test`, against OpenSSH, which is the libvirt
       Job's whole difference
-- [ ] Live: one libvirt host adopted, then bootstrapped from nothing (R-17)
+- [x] A Provider write the API server refuses fails the Host (`ProviderApplyRefused`);
+      `controller-test` runs with banlieue's credentialsRef policy installed
+- [ ] banlieue ADR-0157 (Proposed 2026-11-19) shipped, then faubourg's controller granted
+      `reference` on Secrets in banlieue's namespace, and ADR-0018's amendment closed
+- [ ] Live: one libvirt host adopted, then bootstrapped from nothing (R-17). First attempt
+      2026-11-19, adopting a libvirt Provider on the core cluster: refused by banlieue's
+      credentialsRef policy, which the kind tests did not install
 
 ### D. Firecracker (gated on banlieue roadmap 20)
 
