@@ -17,6 +17,9 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.providerClassRef.name
+      name: Class
+      type: string
     - jsonPath: .spec.storage.mode
       name: Storage
       type: string
@@ -35,12 +38,30 @@ spec:
         description: Auto-generated derived type for AvailabilityZoneSpec via `CustomResource`
         properties:
           spec:
-            description: Desired state of an availability zone.
+            description: |-
+              Desired state of an availability zone.
+
+              Its class cannot change or be removed once set (ADR-0018 decision 3): banlieue owns a
+              Provider's workload and identity by class, so moving a Provider between classes is not a
+              relabel.
             properties:
               description:
                 description: Free-form description for operators.
                 nullable: true
                 type: string
+              providerClassRef:
+                description: |-
+                  The banlieue `ProviderClass` every member host's Provider references (ADR-0018). Its
+                  `backend` decides how faubourg drives the zone's hosts. Omitted: the controller's
+                  `--provider-class`. It cannot change or be removed once set.
+                nullable: true
+                properties:
+                  name:
+                    description: The `ProviderClass`'s name.
+                    type: string
+                required:
+                - name
+                type: object
               providerLabels:
                 additionalProperties:
                   type: string
@@ -142,6 +163,9 @@ spec:
         - spec
         title: AvailabilityZone
         type: object
+        x-kubernetes-validations:
+        - message: a zone's providerClassRef cannot change or be removed once set
+          rule: "!has(oldSelf.spec.providerClassRef) || (has(self.spec.providerClassRef) && self.spec.providerClassRef.name == oldSelf.spec.providerClassRef.name)"
     served: true
     storage: true
     subresources:

@@ -5,6 +5,7 @@
 //!
 //! Pure functions first:
 //!
+//! - [`backend`]: the provider backends faubourg drives, chosen by a zone's class (ADR-0018).
 //! - [`health`]: what a host's banlieue `Provider` says about the host (ADR-0007).
 //! - [`phase`]: the Host phase machine, from its spec, zone, bootstrap Job and that health.
 //! - [`job`]: the bootstrap Job a Host needs, in the shape the admission policy admits
@@ -17,6 +18,7 @@
 //! carries out what it returns, so every decision the controller makes is covered by a unit
 //! test that needs no API server.
 
+pub mod backend;
 pub mod config;
 pub mod controller;
 pub mod drain;

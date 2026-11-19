@@ -185,8 +185,14 @@ different key and is refused.
 ## The host's Provider and its credential
 
 For a bootstrapped Host, faubourg creates the `Provider` itself, named after the Host, in
-banlieue's namespace, of the configured class (`--provider-class`, default
-`cloud-hypervisor`), which must be `External`. banlieue's operator then creates its
+banlieue's namespace, of its zone's class: the zone's `providerClassRef`, or the controller's
+`--provider-class` (default `cloud-hypervisor`) when the zone names none
+([ADR-0018](../adr/0018-a-zone-names-its-provider-class.md)). faubourg drives a class whose
+`backend` is `cloud-hypervisor` and whose `deployment` is `External`; any other class fails the
+zone's Hosts with `ProviderBackendUnsupported`. A Host whose existing `Provider` references
+another class than its zone's is `ProviderClassMismatch`, and faubourg leaves that `Provider`
+alone. Two Hosts with the same `address` (compared as written, ignoring the case of an IPv6 address's hex digits, never resolved)
+are both `DuplicateAddress`: one machine is one Host. banlieue's operator then creates its
 ServiceAccount, and only then does faubourg create the bootstrap Job (`Pending`, reason
 `AwaitingProviderIdentity`, until it has).
 

@@ -13,6 +13,8 @@
 use std::collections::BTreeMap;
 
 use banlieue_api::banlieue::Provider;
+
+use crate::backend::{Backend, REASON_BACKEND_UNSUPPORTED};
 use faubourg_api::LABEL_HOST;
 use faubourg_api::host::{Host, HostPhase};
 use faubourg_api::zone::{
@@ -49,12 +51,13 @@ pub use banlieue_api::banlieue::{RAW_CPU_MODEL, RAW_VMM};
 /// At most this many hosts are named in a condition message; the rest are counted.
 const MAX_NAMED_HOSTS: usize = 10;
 
-/// The zone's status from its Hosts, at `now`. The transition time moves only when `Ready`
-/// flips.
+/// The zone's status from its Hosts and whether faubourg drives its class (`backend`, ADR-0018),
+/// at `now`. The transition time moves only when `Ready` flips.
 pub fn status(
     zone: &AvailabilityZone,
     hosts: &[Host],
     providers: &[Provider],
+    backend: &Result<Backend, String>,
     now: &Time,
 ) -> AvailabilityZoneStatus {
     let name = zone.metadata.name.as_deref().unwrap_or_default();
@@ -68,7 +71,7 @@ pub fn status(
         })
         .collect();
     let cordoned = ready.iter().filter(|h| h.spec.cordoned).count();
-    let (is_ready, reason, message) = decide(zone, members.len(), ready.len(), cordoned);
+    let (is_ready, reason, message) = decide(zone, backend, members.len(), ready.len(), cordoned);
     let ready_condition = condition(
         zone,
         CONDITION_READY,
@@ -231,6 +234,7 @@ fn named(mut hosts: Vec<String>) -> String {
 /// `Ready`, its reason and message: the first row of ADR-0015's table that applies.
 fn decide(
     zone: &AvailabilityZone,
+    backend: &Result<Backend, String>,
     members: usize,
     ready: usize,
     cordoned: usize,
@@ -242,6 +246,10 @@ fn decide(
             REASON_INVALID_SPEC
         };
         return (false, reason, invalid.to_string());
+    }
+    // A class faubourg does not drive: its hosts are all refused (ADR-0018 decision 2).
+    if let Err(why) = backend {
+        return (false, REASON_BACKEND_UNSUPPORTED, why.clone());
     }
     if members == 0 {
         return (false, REASON_NO_HOSTS, "no Host names this zone".into());
@@ -319,6 +327,32 @@ mod tests {
         h
     }
 
+    const DRIVEN: Result<Backend, String> = Ok(Backend::CloudHypervisor);
+
+    #[test]
+    fn a_zone_whose_class_faubourg_cannot_drive_is_not_ready() {
+        let hosts = [host("hv01", "az1", Some(HostPhase::Ready), false)];
+        let s = status(
+            &zone(StorageMode::Local),
+            &hosts,
+            &[],
+            &Err("ProviderClass libvirt has backend libvirt, which faubourg does not drive".into()),
+            &at(1),
+        );
+        assert_eq!(ready(&s), ("False", REASON_BACKEND_UNSUPPORTED));
+        assert!(s.conditions[0].message.contains("libvirt"));
+        assert_eq!(s.ready_hosts, 1, "the counts are still reported");
+        // A refused spec is said first: the class may be named by an invalid ref.
+        let s = status(
+            &zone(StorageMode::Shared),
+            &hosts,
+            &[],
+            &Err("x".into()),
+            &at(1),
+        );
+        assert_eq!(ready(&s), ("False", REASON_STORAGE_MODE_UNSUPPORTED));
+    }
+
     fn ready(s: &AvailabilityZoneStatus) -> (&str, &str) {
         let c = &s.conditions[0];
         assert_eq!(c.type_, CONDITION_READY);
@@ -331,6 +365,7 @@ mod tests {
             &zone(StorageMode::Shared),
             &[host("hv01", "az1", Some(HostPhase::Ready), false)],
             &[],
+            &DRIVEN,
             &at(1),
         );
         assert_eq!(ready(&s), ("False", REASON_STORAGE_MODE_UNSUPPORTED));
@@ -343,7 +378,7 @@ mod tests {
         z.spec
             .provider_labels
             .insert("faubourg.firestoned.io/zone".into(), "az2".into());
-        let s = status(&z, &[], &[], &at(1));
+        let s = status(&z, &[], &[], &DRIVEN, &at(1));
         assert_eq!(ready(&s), ("False", REASON_INVALID_SPEC));
     }
 
@@ -353,6 +388,7 @@ mod tests {
             &zone(StorageMode::Local),
             &[host("hv01", "az2", Some(HostPhase::Ready), false)],
             &[],
+            &DRIVEN,
             &at(1),
         );
         assert_eq!(ready(&s), ("False", REASON_NO_HOSTS));
@@ -370,7 +406,7 @@ mod tests {
             host("hv02", "az1", Some(HostPhase::Degraded), false),
             host("hv03", "az1", None, false),
         ];
-        let s = status(&zone(StorageMode::Local), &hosts, &[], &at(1));
+        let s = status(&zone(StorageMode::Local), &hosts, &[], &DRIVEN, &at(1));
         assert_eq!(ready(&s), ("False", REASON_NO_READY_HOST));
         assert_eq!((s.hosts, s.ready_hosts, s.cordoned_hosts), (3, 0, 0));
     }
@@ -381,7 +417,7 @@ mod tests {
             host("hv01", "az1", Some(HostPhase::Ready), true),
             host("hv02", "az1", Some(HostPhase::Pending), false),
         ];
-        let s = status(&zone(StorageMode::Local), &hosts, &[], &at(1));
+        let s = status(&zone(StorageMode::Local), &hosts, &[], &DRIVEN, &at(1));
         assert_eq!(ready(&s), ("False", REASON_ALL_READY_HOSTS_CORDONED));
         assert_eq!((s.hosts, s.ready_hosts, s.cordoned_hosts), (2, 1, 1));
     }
@@ -393,7 +429,7 @@ mod tests {
             host("hv02", "az1", Some(HostPhase::Ready), false),
             host("hv03", "az1", Some(HostPhase::Failed), false),
         ];
-        let s = status(&zone(StorageMode::Local), &hosts, &[], &at(1));
+        let s = status(&zone(StorageMode::Local), &hosts, &[], &DRIVEN, &at(1));
         assert_eq!(ready(&s), ("True", REASON_HOSTS_READY));
         assert_eq!((s.hosts, s.ready_hosts, s.cordoned_hosts), (3, 2, 1));
         assert_eq!(s.observed_generation, Some(3));
@@ -406,7 +442,7 @@ mod tests {
             host("hv01", "az1", Some(HostPhase::Pending), true),
             host("hv02", "az1", Some(HostPhase::Ready), false),
         ];
-        let s = status(&zone(StorageMode::Local), &hosts, &[], &at(1));
+        let s = status(&zone(StorageMode::Local), &hosts, &[], &DRIVEN, &at(1));
         assert_eq!(s.cordoned_hosts, 0, "cordonedHosts is of the ready ones");
         assert_eq!(ready(&s), ("True", REASON_HOSTS_READY));
     }
@@ -415,8 +451,8 @@ mod tests {
     fn the_transition_time_moves_only_when_ready_flips() {
         let up = [host("hv01", "az1", Some(HostPhase::Ready), false)];
         let mut z = zone(StorageMode::Local);
-        z.status = Some(status(&z, &up, &[], &at(100)));
-        let again = status(&z, &up, &[], &at(200));
+        z.status = Some(status(&z, &up, &[], &DRIVEN, &at(100)));
+        let again = status(&z, &up, &[], &DRIVEN, &at(200));
         assert_eq!(again.conditions[0].last_transition_time, at(100));
         assert_eq!(
             again,
@@ -424,7 +460,7 @@ mod tests {
             "an unchanged zone writes nothing new"
         );
         let down = [host("hv01", "az1", Some(HostPhase::Degraded), false)];
-        let flipped = status(&z, &down, &[], &at(300));
+        let flipped = status(&z, &down, &[], &DRIVEN, &at(300));
         assert_eq!(flipped.conditions[0].last_transition_time, at(300));
     }
 
@@ -458,7 +494,7 @@ mod tests {
     }
 
     fn matching(hosts: &[Host], providers: &[Provider]) -> (String, String, String) {
-        let s = status(&zone(StorageMode::Local), hosts, providers, &at(1));
+        let s = status(&zone(StorageMode::Local), hosts, providers, &DRIVEN, &at(1));
         let c = s
             .conditions
             .iter()
@@ -612,6 +648,7 @@ mod tests {
                 reporting("hv01", VMM, CPU),
                 reporting("hv02", VMM, "AMD EPYC 7302"),
             ],
+            &DRIVEN,
             &at(1),
         );
         assert_eq!(ready(&s), ("True", REASON_HOSTS_READY));
@@ -622,12 +659,12 @@ mod tests {
         let hosts = [up("hv01"), up("hv02")];
         let same = [reporting("hv01", VMM, CPU), reporting("hv02", VMM, CPU)];
         let mut z = zone(StorageMode::Local);
-        z.status = Some(status(&z, &hosts, &same, &at(100)));
+        z.status = Some(status(&z, &hosts, &same, &DRIVEN, &at(100)));
         let differ = [
             reporting("hv01", VMM, CPU),
             reporting("hv02", VMM, "AMD EPYC 7302"),
         ];
-        let s = status(&z, &hosts, &differ, &at(200));
+        let s = status(&z, &hosts, &differ, &DRIVEN, &at(200));
         assert_eq!(s.conditions[0].last_transition_time, at(100), "Ready held");
         assert_eq!(s.conditions[1].type_, CONDITION_HOSTS_MATCH);
         assert_eq!(

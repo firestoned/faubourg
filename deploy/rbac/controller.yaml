@@ -55,9 +55,11 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # A zone's class decides how its hosts are driven, and a change to it re-decides them
+  # (ADR-0018). Read only.
   - apiGroups: ["banlieue.io"]
     resources: ["providerclasses"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   # Draining a host (ADR-0017 decision 7): find the VMs scheduled on it, in every namespace, and
   # ask banlieue to move them. Never update, patch or delete a VM; never change a move.
   - apiGroups: ["banlieue.io"]

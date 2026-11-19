@@ -246,13 +246,16 @@ spec:
     - name: from-the-bootstrap-pods
       expression: "request.userInfo.username == 'system:serviceaccount:faubourg-credentials:faubourg-bootstrap'"
   validations:
+    # One banlieue-provider-<class>- entry per External class the site uses (ADR-0018 decision
+    # 5). A bare banlieue-provider- would admit every class, so a class name is required.
     - expression: >-
-        has(params.data) && 'providerServiceAccountPrefix' in params.data
-        && params.data.providerServiceAccountPrefix.startsWith('banlieue-provider-')
-        && params.data.providerServiceAccountPrefix.endsWith('-')
-      message: "faubourg-bootstrap-policy must set providerServiceAccountPrefix to banlieue-provider-<class>-"
-    - expression: "request.name.startsWith(params.data.providerServiceAccountPrefix)"
-      message: "a bootstrap pod mints tokens only for a provider ServiceAccount of the configured class"
+        has(params.data) && 'providerServiceAccountPrefixes' in params.data
+        && params.data.providerServiceAccountPrefixes.split(',').all(p,
+             p.startsWith('banlieue-provider-') && p.endsWith('-')
+             && p.size() > size('banlieue-provider-'))
+      message: "faubourg-bootstrap-policy must set providerServiceAccountPrefixes to banlieue-provider-<class>- entries, comma-separated"
+    - expression: "params.data.providerServiceAccountPrefixes.split(',').exists(p, request.name.startsWith(p))"
+      message: "a bootstrap pod mints tokens only for a provider ServiceAccount of a listed class"
     - expression: "has(object.spec.expirationSeconds) && object.spec.expirationSeconds <= 86400"
       message: "a provider token lives at most a day"
     # The API server fills in its own audiences before admission; anything else is refused.

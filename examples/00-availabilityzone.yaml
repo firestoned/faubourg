@@ -10,3 +10,7 @@ spec:
     mode: Local
   providerLabels:
     topology.example.com/rack: a
+  # The banlieue ProviderClass of every host in the zone (ADR-0018). Omitted, the controller's
+  # --provider-class (default cloud-hypervisor). It cannot change once set.
+  # providerClassRef:
+  #   name: cloud-hypervisor

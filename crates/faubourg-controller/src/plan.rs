@@ -24,6 +24,7 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
+use crate::backend::{Backend, REASON_BACKEND_UNSUPPORTED, REASON_CLASS_MISMATCH, class_name};
 use crate::drain::{CONDITION_DRAINED, Drained};
 use crate::health::ProviderHealth;
 use crate::job::{
@@ -32,8 +33,8 @@ use crate::job::{
 };
 use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
 use crate::provider::{
-    REASON_AWAITING_IDENTITY, REASON_CLASS_NOT_EXTERNAL, class_is_external, identity_ready,
-    labels_body, migrated_spec_body, provider_service_account, spec_body,
+    REASON_AWAITING_IDENTITY, identity_ready, labels_body, migrated_spec_body,
+    provider_service_account, spec_body,
 };
 
 /// The Host condition the reconciler writes.
@@ -54,6 +55,8 @@ pub const REASON_NO_SCRIPT_SOURCE: &str = "NoScriptSource";
 pub const REASON_IMAGE_NOT_PINNED: &str = "ImageNotPinned";
 /// Reason: the bootstrap policy pins no digest for the Host's script (ADR-0013 decision 2).
 pub const REASON_SCRIPT_NOT_PINNED: &str = "ScriptNotPinned";
+/// Reason: another Host has the same literal address (ADR-0018 decision 10).
+pub const REASON_DUPLICATE_ADDRESS: &str = "DuplicateAddress";
 
 /// Everything one reconcile reads.
 #[derive(Clone, Copy, Debug)]
@@ -70,7 +73,7 @@ pub struct World<'a> {
     pub providers: &'a [Provider],
     /// The Provider named after the Host, labelled or not (ADR-0011 decision 1).
     pub own_provider: Option<&'a Provider>,
-    /// The configured `ProviderClass`, if it exists.
+    /// The zone's `ProviderClass` (or the configured default's), if it exists (ADR-0018).
     pub class: Option<&'a ProviderClass>,
     /// The controller's configuration.
     pub cfg: &'a BootstrapConfig,
@@ -79,6 +82,8 @@ pub struct World<'a> {
     pub pins: Option<&'a Policy>,
     /// Every bootstrap Job in the credentials namespace, for the rollout (ADR-0013 decision 5).
     pub fleet: &'a [Job],
+    /// Every Host, for `DuplicateAddress` (ADR-0018 decision 10). The Host itself may be in it.
+    pub peers: &'a [Host],
     /// The time to stamp on a condition that changes.
     pub now: &'a Time,
     /// The drain's `Drained` condition, while the Host is draining (ADR-0017 decision 4).
@@ -148,11 +153,12 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
     } else {
         job
     };
-    let (refusal, decision) = phase(w, refusal, judged, zone, identity);
-    let (apply_provider_spec, apply_provider) = if valid && refusal.is_none() {
-        provider_bodies(w, script)
-    } else {
-        (None, None)
+    let class = class_name(w.zone, &w.cfg.provider.class);
+    let backend = Backend::of(class, w.class);
+    let (refusal, decision) = phase(w, refusal, judged, zone, identity, class, &backend);
+    let (apply_provider_spec, apply_provider) = match (&backend, valid && refusal.is_none()) {
+        (Ok(b), true) => provider_bodies(w, script, *b, class),
+        _ => (None, None),
     };
 
     // A Job that succeeded may be the only record of that success until the status, as read
@@ -284,27 +290,34 @@ fn refused(e: &JobError) -> Decision {
     }
 }
 
-/// The refusal, if any, and the phase decision (ADR-0009, ADR-0011 decision 2).
+/// The refusal, if any, and the phase decision (ADR-0009, ADR-0011 decision 2, ADR-0018).
 fn phase(
     w: &World<'_>,
     refusal: Option<Decision>,
     job: JobState,
     zone: ZoneState,
     identity: bool,
+    class: &str,
+    backend: &Result<Backend, String>,
 ) -> (Option<Decision>, Decision) {
     let host = w.host;
     let script = host.spec.bootstrap.method == BootstrapMethod::Script;
     let valid = host.spec.validate().is_ok();
-    // A bootstrapped Host needs an External class before anything is created for it.
+    // Before anything is created or labelled for a Host: no other Host at its address, a class
+    // faubourg drives, and no Provider of another class already there.
     let refusal = refusal.or_else(|| {
-        (script && valid && !class_is_external(w.class)).then(|| Decision {
-            phase: HostPhase::Failed,
-            reason: REASON_CLASS_NOT_EXTERNAL,
-            message: format!(
-                "ProviderClass {} is missing or not External",
-                w.cfg.provider.class
-            ),
-        })
+        if !valid {
+            return None;
+        }
+        duplicate_address(host, w.peers)
+            .or_else(|| {
+                backend.as_ref().err().map(|why| Decision {
+                    phase: HostPhase::Failed,
+                    reason: REASON_BACKEND_UNSUPPORTED,
+                    message: why.clone(),
+                })
+            })
+            .or_else(|| class_mismatch(w.own_provider, class))
     });
     let mut decision = refusal.clone().unwrap_or_else(|| {
         decide(&Observed {
@@ -324,6 +337,45 @@ fn phase(
         };
     }
     (refusal, decision)
+}
+
+/// `DuplicateAddress`: another Host, not being deleted, has the same `spec.address`, compared
+/// literally and case-folded, never resolved (ADR-0018 decision 10). Both are refused.
+fn duplicate_address(host: &Host, peers: &[Host]) -> Option<Decision> {
+    let mut others: Vec<&str> = peers
+        .iter()
+        .filter(|p| p.metadata.uid != host.metadata.uid)
+        .filter(|p| p.metadata.deletion_timestamp.is_none())
+        .filter(|p| p.spec.address.eq_ignore_ascii_case(&host.spec.address))
+        .filter_map(|p| p.metadata.name.as_deref())
+        .collect();
+    if others.is_empty() {
+        return None;
+    }
+    others.sort_unstable();
+    Some(Decision {
+        phase: HostPhase::Failed,
+        reason: REASON_DUPLICATE_ADDRESS,
+        message: format!(
+            "the same address as Host {}: one machine is one Host",
+            others.join(", ")
+        ),
+    })
+}
+
+/// `ProviderClassMismatch`: the Provider named after the Host references another class than its
+/// zone's. faubourg never moves a Provider between classes (ADR-0018 decision 3).
+fn class_mismatch(own: Option<&Provider>, class: &str) -> Option<Decision> {
+    let own = own?;
+    let theirs = own.spec.provider_class_ref.name.as_str();
+    (theirs != class).then(|| Decision {
+        phase: HostPhase::Failed,
+        reason: REASON_CLASS_MISMATCH,
+        message: format!(
+            "Provider {} references ProviderClass {theirs}, not the zone's {class}",
+            own.metadata.name.as_deref().unwrap_or_default()
+        ),
+    })
 }
 
 /// The Job to create, completed: the `ServiceAccount` banlieue published for the host's Provider
@@ -413,15 +465,18 @@ fn bootstrap_condition(job: JobState, hold: Option<Hold>) -> (bool, &'static str
     }
 }
 
-/// The Provider's spec and labels bodies, for a Host that validates (ADR-0011, amended).
+/// The Provider's spec and labels bodies, for a Host that validates (ADR-0011, amended), with
+/// the zone's class and its backend's endpoint (ADR-0018).
 fn provider_bodies(
     w: &World<'_>,
     script: bool,
+    backend: Backend,
+    class: &str,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     let ns = &w.cfg.provider.namespace;
     if script {
         (
-            spec_body(w.host, &w.cfg.provider.class, ns),
+            spec_body(w.host, backend, class, ns),
             labels_body(w.host, w.zone, ns),
         )
     } else if let Some(own) = w.own_provider {
@@ -565,6 +620,7 @@ mod tests {
         ScriptSourceKind, SecretName, SshSpec,
     };
     use faubourg_api::policy::PinnedScript;
+    use faubourg_api::zone::ProviderClassRef;
     use k8s_openapi::jiff::Timestamp;
     use serde_json::json;
 
@@ -704,6 +760,7 @@ mod tests {
         cfg: BootstrapConfig,
         pins: Option<Policy>,
         fleet: Vec<Job>,
+        peers: Vec<Host>,
         now: Time,
         drained: Option<Drained>,
     }
@@ -724,6 +781,7 @@ mod tests {
                     provider_ca: None,
                 }),
                 fleet: vec![],
+                peers: vec![],
                 now: at(1_000),
                 drained: None,
             }
@@ -741,6 +799,7 @@ mod tests {
                 cfg: &self.cfg,
                 pins: self.pins.as_ref(),
                 fleet: &self.fleet,
+                peers: &self.peers,
                 now: &self.now,
                 drained: self.drained.as_ref(),
             })
@@ -749,12 +808,22 @@ mod tests {
     }
 
     fn class(deployment: &str) -> ProviderClass {
+        class_of("cloud-hypervisor", "cloud-hypervisor", deployment)
+    }
+
+    fn class_of(name: &str, backend: &str, deployment: &str) -> ProviderClass {
         serde_json::from_value(json!({
             "apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass",
-            "metadata": { "name": "cloud-hypervisor" },
-            "spec": { "backend": "cloud-hypervisor", "deployment": deployment }
+            "metadata": { "name": name },
+            "spec": { "backend": backend, "deployment": deployment }
         }))
         .unwrap()
+    }
+
+    fn zone_with_class(class: &str) -> AvailabilityZone {
+        let mut z = zone("Local");
+        z.spec.provider_class_ref = Some(ProviderClassRef { name: class.into() });
+        z
     }
 
     /// The Provider named after the Host, with or without its identity.
@@ -1087,6 +1156,7 @@ mod tests {
             cfg: &f.cfg,
             pins: f.pins.as_ref(),
             fleet: &f.fleet,
+            peers: &f.peers,
             now: &f.now,
             drained: None,
         });
@@ -1454,17 +1524,112 @@ mod tests {
     }
 
     #[test]
-    fn a_class_that_is_missing_or_not_external_fails_the_host_and_creates_nothing() {
-        for class in [None, Some(class("Managed"))] {
-            let mut f = Fixture::new(host(1));
-            f.class = class;
+    fn a_class_faubourg_cannot_drive_fails_the_host_and_creates_nothing() {
+        // Missing, Managed, or a backend with no driver yet (ADR-0018 decision 2); for a
+        // bootstrapped and an adopted Host alike.
+        for h in [host(1), adopted()] {
+            for class in [
+                None,
+                Some(class("Managed")),
+                Some(class_of("cloud-hypervisor", "libvirt", "Managed")),
+                Some(class_of("cloud-hypervisor", "firecracker", "External")),
+            ] {
+                let mut f = Fixture::new(h.clone());
+                f.class = class.clone();
+                let p = f.plan();
+                assert_eq!(p.decision.phase, HostPhase::Failed, "{class:?}");
+                assert_eq!(p.decision.reason, REASON_BACKEND_UNSUPPORTED);
+                assert_eq!(p.create, None);
+                assert_eq!(p.apply_provider, None);
+                assert_eq!(p.apply_provider_spec, None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_provider_references_the_zones_class() {
+        let mut f = Fixture::new(host(1));
+        f.zone = Some(zone_with_class("ch-canary"));
+        f.class = Some(class_of("ch-canary", "cloud-hypervisor", "External"));
+        f.own_provider = None;
+        let b = f.plan().apply_provider_spec.unwrap();
+        assert_eq!(b["spec"]["providerClassRef"]["name"], "ch-canary");
+        assert_eq!(
+            b["spec"]["connection"]["endpoint"],
+            "ch://hv01.home.example"
+        );
+    }
+
+    #[test]
+    fn a_provider_of_another_class_fails_the_host_and_is_left_alone() {
+        for h in [host(1), adopted()] {
+            let mut f = Fixture::new(h);
+            f.zone = Some(zone_with_class("ch-canary"));
+            f.class = Some(class_of("ch-canary", "cloud-hypervisor", "External"));
+            // own() references cloud-hypervisor.
             let p = f.plan();
             assert_eq!(p.decision.phase, HostPhase::Failed);
-            assert_eq!(p.decision.reason, REASON_CLASS_NOT_EXTERNAL);
+            assert_eq!(p.decision.reason, REASON_CLASS_MISMATCH);
+            assert!(
+                p.decision.message.contains("ch-canary"),
+                "{}",
+                p.decision.message
+            );
             assert_eq!(p.create, None);
-            assert_eq!(p.apply_provider, None);
+            assert_eq!(p.apply_provider, None, "faubourg never rewrites it");
             assert_eq!(p.apply_provider_spec, None);
         }
+    }
+
+    fn peer(name: &str, address: &str) -> Host {
+        let mut h = host(1);
+        h.metadata.name = Some(name.into());
+        h.metadata.uid = Some(format!("uid-{name}"));
+        h.spec.address = address.into();
+        h
+    }
+
+    #[test]
+    fn two_hosts_with_one_address_both_fail() {
+        // Literal and case-folded (ADR-0018 decision 10); the Host itself is not its own peer.
+        // A DNS name is lowercase by validation, so case matters for an IPv6 address.
+        for (own, address, duplicate) in [
+            ("hv01.home.example", "hv01.home.example", true),
+            ("2001:db8::1", "2001:DB8::1", true),
+            ("hv01.home.example", "hv02.home.example", false),
+            // Not resolved: a name and an IP for one machine are not caught.
+            ("hv01.home.example", "192.0.2.10", false),
+        ] {
+            for mut h in [host(1), adopted()] {
+                h.spec.address = own.into();
+                let mut f = Fixture::new(h);
+                f.peers = vec![f.host.clone(), peer("hv02", address)];
+                let p = f.plan();
+                if duplicate {
+                    assert_eq!(p.decision.phase, HostPhase::Failed, "{address}");
+                    assert_eq!(p.decision.reason, REASON_DUPLICATE_ADDRESS);
+                    assert!(
+                        p.decision.message.contains("hv02"),
+                        "{}",
+                        p.decision.message
+                    );
+                    assert_eq!(p.create, None);
+                    assert_eq!(p.apply_provider, None);
+                    assert_eq!(p.apply_provider_spec, None);
+                } else {
+                    assert_ne!(p.decision.reason, REASON_DUPLICATE_ADDRESS, "{address}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_host_being_deleted_is_no_duplicate() {
+        let mut f = Fixture::new(host(1));
+        let mut gone = peer("hv02", "hv01.home.example");
+        gone.metadata.deletion_timestamp = Some(at(1));
+        f.peers = vec![gone];
+        assert_ne!(f.plan().decision.reason, REASON_DUPLICATE_ADDRESS);
     }
 
     #[test]
@@ -1489,9 +1654,10 @@ mod tests {
             "hv01"
         );
         f.class = None;
-        assert!(
-            f.plan().apply_provider.is_some(),
-            "an adopted host does not depend on the class"
+        assert_eq!(
+            f.plan().apply_provider,
+            None,
+            "an adopted host needs its zone's class too (ADR-0018 decision 2)"
         );
     }
 

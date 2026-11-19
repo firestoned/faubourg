@@ -20,9 +20,10 @@
 #                       hosts trust for the API server when they reach it under another
 #                       certificate than the cluster's (a load balancer). Empty: the cluster
 #                       CA. Changing it re-bootstraps every Host, one at a time (ADR-0016).
-#   providerServiceAccountPrefix
-#                       the only ServiceAccounts a bootstrap pod may mint a token for:
-#                       banlieue-provider-<class>- (ADR-0011 decision 8)
+#   providerServiceAccountPrefixes
+#                       comma-separated: the only ServiceAccounts a bootstrap pod may mint a
+#                       token for, one banlieue-provider-<class>- entry per External class
+#                       your zones use (ADR-0011 decision 8, ADR-0018 decision 5)
 #   apiAudiences        comma-separated: the API server's own token audiences, the only ones
 #                       a provider token may carry. kubeadm and kind default to the one
 #                       below; check `--api-audiences` (or the issuer) on other distributions.
@@ -36,5 +37,5 @@ data:
   serviceAccountName: faubourg-bootstrap
   scriptSources: "ConfigMap/faubourg-install/install.sh@sha256:<your-script-sha256>"
   providerCASource: ""
-  providerServiceAccountPrefix: "banlieue-provider-cloud-hypervisor-"
+  providerServiceAccountPrefixes: "banlieue-provider-cloud-hypervisor-"
   apiAudiences: "https://kubernetes.default.svc.cluster.local"
