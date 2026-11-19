@@ -47,6 +47,7 @@ mkdir -p "$(dirname "$OUT")"
   for f in "$ROOT"/deploy/crds/*.yaml "$ROOT/deploy/rbac/controller.yaml" \
            "$ROOT/deploy/admission/bootstrap-policy-params.yaml" \
            "$ROOT/deploy/admission/bootstrap-policy.yaml" \
+           "$ROOT/deploy/admission/provider-connection-policy.yaml" \
            "$ROOT/deploy/controller/deployment.yaml"; do
     echo "---"
     render "$f"

@@ -34,7 +34,7 @@ flowchart TD
 <sub>Source: flow `flow-add-host` in `architecture.json`.</sub>
 
 
-## Add a libvirt host to a zone (planned, roadmap 04)
+## Add a libvirt host to a zone
 
 From a new Host in a libvirt zone to a host banlieue can place VMs on (ADR-0018).
 

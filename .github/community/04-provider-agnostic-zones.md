@@ -7,8 +7,8 @@ Implements ADR-0018: a zone names one banlieue ProviderClass, and faubourg drive
 through a driver chosen by the class's `backend`. Each Host is still one Provider and one
 banlieue failure domain; the zone is still a label on those failure domains. ADD cycle per item.
 
-**Status: in progress.** ADR-0018 Accepted 2026-11-18; CALM updated. Phase B (the driver seam)
-done; the libvirt and Firecracker parts are planned. Firecracker (phase D) is gated on
+**Status: in progress.** ADR-0018 Accepted 2026-11-18; CALM updated. Phases B (the driver seam)
+and C (libvirt) done, but for C's live run; Firecracker is planned. Firecracker (phase D) is gated on
 banlieue's Firecracker provider (banlieue roadmap 20); phases B and C do not wait for it.
 
 ## Backends in scope
@@ -61,18 +61,25 @@ need per-failure-domain labels and cordon in banlieue first.
 
 ### C. libvirt
 
-- [ ] Zone `spec.libvirt.credentialsRef` and `caBundleRef`; validation (names, `faubourg-`
-      prefix) in `faubourg-api`
-- [ ] Provider apply: `qemu+tls://<address>/system`, `credentialsRef`, `caBundle` under the
-      spec field manager
-- [ ] `faubourg-provider-connection` ValidatingAdmissionPolicy and its `vap-test` cases
-- [ ] Bootstrap Job without `kube-api` for a Managed backend; Job policy admits that shape
-- [ ] Health for Managed: `Ready` and `ProviderReachable` for the current generation (tests
-      first)
-- [ ] Drain refused with `MovesUnsupported` for non-moving backends
-- [ ] `examples/install-libvirt.sh` and its sudo rule; `examples/` zone for libvirt
-- [ ] `controller-test` and `e2e-test` cases for a libvirt zone
-- [ ] Live: one libvirt host adopted, then bootstrapped from nothing
+- [x] Zone `spec.libvirt.credentialsRef` and `caBundleRef`; validation (names, `faubourg-`
+      prefix, a ConfigMap key) in `faubourg-api`; `ProviderConnectionInvalid` when the
+      connection does not fit the backend
+- [x] Provider apply: `qemu+tls://<address>/system`, `credentialsRef`, `caBundle` (configMapRef)
+      under the spec field manager
+- [x] `faubourg-provider-connection` ValidatingAdmissionPolicy and its `vap-test` cases (it judges
+      only a write that changes the connection, so an adopted Provider can still be labelled)
+- [x] Bootstrap Job without provider variables, `kube-api` or provider CA for a Managed
+      backend, created without an identity wait; the Job policy already admits that shape
+      (`vap-test` submits it); a provider CA re-pin does not re-bootstrap such a host
+- [x] Health for Managed: `Ready` and `ProviderReachable` for the current generation
+      (`ProviderUnreachable`)
+- [x] Drain refused with `MovesUnsupported` for non-moving backends, with the cordon kept
+- [x] `examples/host/install-libvirt.sh` (same sudo rule); `examples/03-libvirt-zone.yaml`
+- [x] `controller-test` cases for a libvirt zone (missing connection, the Provider past the
+      policy, a Job that mints nothing, health, drain). No separate `e2e-test` case: the image
+      runs with no provider inputs in `bootstrap-test`, against OpenSSH, which is the libvirt
+      Job's whole difference
+- [ ] Live: one libvirt host adopted, then bootstrapped from nothing (R-17)
 
 ### D. Firecracker (gated on banlieue roadmap 20)
 
@@ -82,8 +89,8 @@ need per-failure-domain labels and cordon in banlieue first.
 
 ### E. Docs and threat model
 
-- [ ] README status table and opening paragraph (no longer "Cloud Hypervisor hosts" only);
-      concepts, preparing-a-host, API reference, zone-placement
-- [ ] Threat-model full pass, stamp bumped to ADR-0018: the controller's new write to
-      `credentialsRef` (confused deputy, bounded by the policy), the libvirt client
-      certificate as a new asset, the cluster-to-host path on 16514
+- [x] README status table and opening paragraph; concepts, preparing-a-host, API reference
+      (zone-placement is unchanged: a zone still reaches banlieue as a label)
+- [x] Threat-model full pass (eighteenth), stamp bumped to ADR-0018: the controller's write to
+      `credentialsRef` (confused deputy, bounded by the policy), A-16 and A-17, TB-8 (the
+      cluster-to-host path on 16514), R-16 to R-18. Another pass when Firecracker lands

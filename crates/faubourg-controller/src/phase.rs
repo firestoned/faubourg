@@ -55,6 +55,9 @@ pub const REASON_PROVIDER_MISSING: &str = "ProviderMissing";
 pub const REASON_PROVIDER_NOT_READY: &str = "ProviderNotReady";
 /// Reason: the `Provider`'s heartbeat is not `Alive`.
 pub const REASON_HEARTBEAT_NOT_ALIVE: &str = "HeartbeatNotAlive";
+/// Reason: a Managed (in-cluster) provider does not report reaching the host (ADR-0018
+/// decision 8).
+pub const REASON_PROVIDER_UNREACHABLE: &str = "ProviderUnreachable";
 
 /// The current generation's bootstrap Job, as the reconciler observed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,6 +249,11 @@ fn from_provider(
             REASON_PROVIDER_AMBIGUOUS,
             "more than one Provider carries the host's label",
         ),
+        ProviderHealth::Unreachable => decision(
+            HostPhase::Degraded,
+            REASON_PROVIDER_UNREACHABLE,
+            "the host's Provider does not report reaching the host",
+        ),
         ProviderHealth::NoHeartbeat | ProviderHealth::Healthy => decision(
             HostPhase::Degraded,
             REASON_HEARTBEAT_NOT_ALIVE,
@@ -286,17 +294,19 @@ mod tests {
         JobState::Failed(JobFailure::ProviderCaUnpinned),
         JobState::Failed(JobFailure::Other),
     ];
-    const ALL_HEALTH: [ProviderHealth; 5] = [
+    const ALL_HEALTH: [ProviderHealth; 6] = [
         ProviderHealth::Missing,
         ProviderHealth::NotReady,
         ProviderHealth::NoHeartbeat,
+        ProviderHealth::Unreachable,
         ProviderHealth::Ambiguous,
         ProviderHealth::Healthy,
     ];
-    const UNHEALTHY: [ProviderHealth; 4] = [
+    const UNHEALTHY: [ProviderHealth; 5] = [
         ProviderHealth::Missing,
         ProviderHealth::NotReady,
         ProviderHealth::NoHeartbeat,
+        ProviderHealth::Unreachable,
         ProviderHealth::Ambiguous,
     ];
     const ALL_ZONES: [ZoneState; 3] = [

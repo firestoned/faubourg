@@ -43,11 +43,11 @@ flowchart LR
     network-host-mgmt["Host management network"]
     data-asset-install-file["Install file (faubourg-<version>.yaml)"]
     data-asset-provider-class["banlieue ProviderClass"]
-    system-libvirt-host["libvirt host (planned, roadmap 04)"]
-    service-libvirtd["libvirtd (planned, roadmap 04)"]
-    service-banlieue-libvirt-provider["banlieue libvirt provider (planned, roadmap 04)"]
-    data-asset-libvirt-client-credential["libvirt client credential and CA (planned, roadmap 04)"]
-    service-provider-connection-policy["Provider connection admission policy (planned, roadmap 04)"]
+    system-libvirt-host["libvirt host"]
+    service-libvirtd["libvirtd"]
+    service-banlieue-libvirt-provider["banlieue libvirt provider"]
+    data-asset-libvirt-client-credential["libvirt client credential and CA"]
+    service-provider-connection-policy["Provider connection admission policy"]
     subgraph sg_system-faubourg [System Faubourg]
         service-host-controller
         service-zone-controller

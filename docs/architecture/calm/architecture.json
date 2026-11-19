@@ -23,19 +23,19 @@
       "unique-id": "service-host-controller",
       "node-type": "service",
       "name": "Host controller",
-      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), writes status by server-side apply, and drains a Host whose spec.maintenance is Drain: it cordons the Provider, then asks banlieue to move the Host's VMs one at a time by creating VirtualMachineMoves with no target, reports Drained (MovesBlocked naming the VMs banlieue would not move), and on maintenance None deletes its moves that have not reached HandingOver (ADR-0017). It never updates or deletes a VirtualMachine. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token. The Provider's class is the zone's (or --provider-class), and its endpoint and required deployment mode come from a driver chosen by the class's backend, from a closed set (cloud-hypervisor today; anything else ProviderBackendUnsupported, for bootstrapped and adopted Hosts alike); a Host whose existing Provider has another class is ProviderClassMismatch, and two Hosts with one literal, case-folded address are both DuplicateAddress (ADR-0018). Planned (roadmap 04): libvirt and firecracker drivers; a Managed (libvirt) Host is healthy on Ready and ProviderReachable, not on the Lease; a drain on a backend banlieue cannot move cordons and reports MovesUnsupported."
+      "description": "The faubourg-controller Deployment in faubourg-system: two replicas, of which only the leader elected through a Lease acts, and it stops before its lease can lapse (ADR-0009, ADR-0014). Reconciles Host: gates on the zone, applies the host's banlieue Provider (class, endpoint and labels for a bootstrapped host, labels only for an adopted one; never deletes one, ADR-0011), creates the bootstrap Job once banlieue has given the Provider its identity and when the Host's bootstrap inputs change (the pinned script digest among them), holding a re-bootstrap of an already-bootstrapped host until a rollout slot is free and halting the rollout at the first failure (ADR-0013), derives the phase from the Job and the Provider (ADR-0005, ADR-0007), writes status by server-side apply, and drains a Host whose spec.maintenance is Drain: it cordons the Provider, then asks banlieue to move the Host's VMs one at a time by creating VirtualMachineMoves with no target, reports Drained (MovesBlocked naming the VMs banlieue would not move), and on maintenance None deletes its moves that have not reached HandingOver (ADR-0017). It never updates or deletes a VirtualMachine. Never reads SSH Secrets, a script or any ConfigMap but the bootstrap policy parameters, never mints a token. The Provider's class is the zone's (or --provider-class), and its endpoint and required deployment mode come from a driver chosen by the class's backend, from a closed set (cloud-hypervisor today; anything else ProviderBackendUnsupported, for bootstrapped and adopted Hosts alike); a Host whose existing Provider has another class is ProviderClassMismatch, and two Hosts with one literal, case-folded address are both DuplicateAddress (ADR-0018). Drivers: cloud-hypervisor and libvirt; a libvirt zone without spec.libvirt, or a cloud-hypervisor zone with one, is ProviderConnectionInvalid. A Managed (libvirt) Host is healthy on Ready and ProviderReachable for the current generation, not on the Lease (ProviderUnreachable otherwise); its Job is created without waiting for an identity; a drain on a backend banlieue cannot move cordons and reports MovesUnsupported. Planned (roadmap 04): the firecracker driver, once banlieue ships the class."
     },
     {
       "unique-id": "service-zone-controller",
       "node-type": "service",
       "name": "Zone controller",
-      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. Also HostsMatch (HostsDiffer, HostsUnreported), advisory: whether every member's Provider reports the same raw.vmm and raw.cpuModel, which banlieue requires to move a VM between them (ADR-0017 decision 9). A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015). Reads the zone's ProviderClass and reports ProviderBackendUnsupported for a class it does not drive (ADR-0018 decision 2). Planned (roadmap 04): a backend whose Providers do not publish raw.vmm and raw.cpuModel reports HostsUnreported."
+      "description": "Runs in faubourg-controller beside the Host controller, only on the replica holding the leader Lease (ADR-0014). Writes each AvailabilityZone's status by server-side apply under faubourg.firestoned.io/zone-controller, and nothing else: hosts, readyHosts, cordonedHosts and Ready (StorageModeUnsupported, InvalidSpec, NoHosts, NoReadyHost, AllReadyHostsCordoned, HostsReady), a pure function of the zone and its Hosts. Also HostsMatch (HostsDiffer, HostsUnreported), advisory: whether every member's Provider reports the same raw.vmm and raw.cpuModel, which banlieue requires to move a VM between them (ADR-0017 decision 9). A report, not a gate: nothing faubourg decides reads it (ADR-0004, ADR-0015). Reads the zone's ProviderClass and reports ProviderBackendUnsupported for a class it does not drive (ADR-0018 decision 2). Reports ProviderConnectionInvalid when the zone's libvirt connection does not fit its backend. A backend whose Providers do not publish raw.vmm and raw.cpuModel (libvirt) reports HostsUnreported."
     },
     {
       "unique-id": "service-bootstrap-job",
       "node-type": "service",
       "name": "Bootstrap Job",
-      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It refuses a mounted script whose sha256 is not the pinned FAUBOURG_SCRIPT_SHA256 before opening any connection (exit 66, ScriptUnpinned, ADR-0013), and a mounted provider CA whose sha256 is not the pinned FAUBOURG_PROVIDER_CA_SHA256 (exit 67, ProviderCAUnpinned), which it then writes into the host's kubeconfig instead of the cluster CA (ADR-0016), verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010). Planned (roadmap 04): for a Managed (libvirt) backend the Job has no kube-api volume and mints no token (ADR-0018 decision 7)."
+      "description": "One Kubernetes Job per set of a Host's bootstrap inputs (ADR-0009 decision 6), in the credentials namespace (ADR-0005 decision 5). Runs faubourg-bootstrap (ADR-0010): one static Rust binary on russh in an image with no shell, digest-pinned. It refuses a mounted script whose sha256 is not the pinned FAUBOURG_SCRIPT_SHA256 before opening any connection (exit 66, ScriptUnpinned, ADR-0013), and a mounted provider CA whose sha256 is not the pinned FAUBOURG_PROVIDER_CA_SHA256 (exit 67, ProviderCAUnpinned), which it then writes into the host's kubeconfig instead of the cluster CA (ADR-0016), verifies the host key before authenticating (Strict whenever the Secret has knownHosts), checks the on-host script's owner, mode and sha256 with the scoped credential, places it and the sudo rule with the privileged placement credential only when it differs (else ScriptDrift), optionally revokes the placement key, then runs sudo -n /opt/faubourg/install.sh. Every command is a constant; data goes on stdin. Mints the host's first provider token through TokenRequest with its own 10-minute projected token, and hands it to the install script on stdin, never to the controller or a Secret (ADR-0011). Reports the host key fingerprint in its termination message (ADR-0005, ADR-0006, ADR-0008, ADR-0010). For a Managed (libvirt) backend the Job has no provider variables, no kube-api volume and no provider CA: it mints no token and sends the script nothing (ADR-0018 decision 7)."
     },
     {
       "unique-id": "service-bootstrap-admission-policy",
@@ -77,13 +77,13 @@
       "unique-id": "system-banlieue",
       "node-type": "system",
       "name": "banlieue",
-      "description": "VM lifecycle platform. Its controller, scheduler and operator place VMs across Provider failure domains, read provider Leases, and run nothing on the hosts directly; a Managed provider (libvirt, planned in roadmap 04) runs in the cluster and dials its host (banlieue ADR-0060, ADR-0098, ADR-0102)."
+      "description": "VM lifecycle platform. Its controller, scheduler and operator place VMs across Provider failure domains, read provider Leases, and run nothing on the hosts directly; a Managed provider (libvirt) runs in the cluster and dials its host (banlieue ADR-0060, ADR-0098, ADR-0102)."
     },
     {
       "unique-id": "data-asset-provider-cr",
       "node-type": "data-asset",
       "name": "banlieue Provider (one per host)",
-      "description": "Class: the zone's ProviderClass (ADR-0018). Endpoint ch://<address> for cloud-hypervisor; planned (roadmap 04): firecracker's scheme, and for libvirt qemu+tls://<address>/system with the zone's credentialsRef and caBundle. Created by faubourg with the zone, host and cordon labels it owns by field manager, and banlieue's zone key banlieue.io/zone while the Host's zone exists and is valid (ADR-0017 decision 1: the statement that lets banlieue move a VM between the zone's hosts, banlieue ADR-0127); its status (failure domain, capacity, Ready) is written by banlieue's provider for that host (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
+      "description": "Class: the zone's ProviderClass (ADR-0018). Endpoint ch://<address> for cloud-hypervisor; for libvirt qemu+tls://<address>/system with the zone's credentialsRef and caBundle (configMapRef), never insecureSkipTLSVerify. Planned (roadmap 04): firecracker's scheme. Created by faubourg with the zone, host and cordon labels it owns by field manager, and banlieue's zone key banlieue.io/zone while the Host's zone exists and is valid (ADR-0017 decision 1: the statement that lets banlieue move a VM between the zone's hosts, banlieue ADR-0127); its status (failure domain, capacity, Ready) is written by banlieue's provider for that host (ADR-0003, ADR-0007). Created and labelled by faubourg for a bootstrapped host, labelled only for an adopted one (ADR-0011)."
     },
     {
       "unique-id": "data-asset-banlieue-vm-crs",
@@ -154,31 +154,31 @@
     {
       "unique-id": "system-libvirt-host",
       "node-type": "system",
-      "name": "libvirt host (planned, roadmap 04)",
-      "description": "A bare-metal KVM machine in a zone whose class has backend libvirt (ADR-0018). Runs sshd and /opt/faubourg/install.sh exactly as a host-resident host does (shown once, on that host); the install script sets up libvirtd with TLS and reads nothing on stdin (ADR-0018 decision 7). No banlieue process runs on it."
+      "name": "libvirt host",
+      "description": "A bare-metal KVM machine in a zone whose class has backend libvirt (ADR-0018). Runs sshd and /opt/faubourg/install.sh (examples/host/install-libvirt.sh) exactly as a host-resident host does (shown once, on that host); the install script sets up libvirtd with TLS and reads nothing on stdin (ADR-0018 decision 7). No banlieue process runs on it."
     },
     {
       "unique-id": "service-libvirtd",
       "node-type": "service",
-      "name": "libvirtd (planned, roadmap 04)",
+      "name": "libvirtd",
       "description": "libvirt's daemon, listening for TLS on 16514 with auth_tls none: the client certificate is the credential (banlieue ADR-0011). Its server certificate comes from the install script or is already on the host. QEMU guests."
     },
     {
       "unique-id": "service-banlieue-libvirt-provider",
       "node-type": "service",
-      "name": "banlieue libvirt provider (planned, roadmap 04)",
+      "name": "banlieue libvirt provider",
       "description": "A Managed banlieue provider: a Deployment per Provider in banlieue's namespace, run by banlieue's operator, which grants it get on exactly the Secret and ConfigMap its Provider names. Dials qemu+tls://<address>/system and publishes one failure domain named after the Provider, carrying its labels. Its Lease is renewed in the cluster, so it is not the host's heartbeat (ADR-0018 decision 8)."
     },
     {
       "unique-id": "data-asset-libvirt-client-credential",
       "node-type": "data-asset",
-      "name": "libvirt client credential and CA (planned, roadmap 04)",
+      "name": "libvirt client credential and CA",
       "description": "Per zone (ADR-0018 decision 6): a Secret (tls.crt, tls.key) and a ConfigMap (libvirtd's server CA) in banlieue's namespace, created by the operator and named with the faubourg- prefix. The zone references them; faubourg copies the names into each member's Provider and never reads either. Whoever holds the key can drive libvirtd on every host of the zone."
     },
     {
       "unique-id": "service-provider-connection-policy",
       "node-type": "service",
-      "name": "Provider connection admission policy (planned, roadmap 04)",
+      "name": "Provider connection admission policy",
       "description": "ValidatingAdmissionPolicy faubourg-provider-connection, evaluated by the Kubernetes API server on Provider writes by faubourg's controller ServiceAccount: a credentialsRef must start with faubourg-, so a compromised controller cannot point a libvirt Provider at another Provider's credential (ADR-0018 decision 6)."
     }
   ],
@@ -458,7 +458,7 @@
     },
     {
       "unique-id": "rel-host-controller-provider-cr",
-      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011). The class is the zone's and the endpoint the backend's (ADR-0018). Planned (roadmap 04): for libvirt the spec manager also owns connection.credentialsRef and connection.caBundle, from the zone.",
+      "description": "Applies the host's Provider, named after the Host, by server-side apply: the zone, host, cordon and zone labels, and banlieue.io/zone for a member of a valid zone, under faubourg.firestoned.io/host-controller for every host, and the class and endpoint under faubourg.firestoned.io/host-provider-spec for a bootstrapped one only, so a host switched to adopted keeps its spec. Reads its health from the one Provider carrying the host label (ADR-0003, ADR-0007, ADR-0009, ADR-0011). The class is the zone's and the endpoint the backend's (ADR-0018). For libvirt the spec manager also owns connection.credentialsRef and connection.caBundle, from the zone, admitted by faubourg-provider-connection.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -569,7 +569,7 @@
     },
     {
       "unique-id": "rel-provider-connection-policy-kube",
-      "description": "Planned (roadmap 04): the API server evaluates faubourg-provider-connection on every Provider create or update by faubourg's controller, before the object is written. Deny on failure.",
+      "description": "The API server evaluates faubourg-provider-connection on every Provider create or update by faubourg's controller that changes its connection, before the object is written. Deny on failure.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -583,7 +583,7 @@
     },
     {
       "unique-id": "rel-libvirt-provider-credential",
-      "description": "Planned (roadmap 04): gets the Secret and ConfigMap its Provider names, by name, under the Role banlieue's operator gives it (banlieue ADR-0003).",
+      "description": "Gets the Secret and ConfigMap its Provider names, by name, under the Role banlieue's operator gives it (banlieue ADR-0003).",
       "relationship-type": {
         "connects": {
           "source": {
@@ -597,7 +597,7 @@
     },
     {
       "unique-id": "rel-libvirt-provider-libvirtd",
-      "description": "Planned (roadmap 04): libvirt's RPC over mutual TLS to port 16514, the client certificate as the credential, the server verified against the zone's CA (banlieue ADR-0011). From the cluster to the host: a path host-resident hosts do not need.",
+      "description": "Libvirt's RPC over mutual TLS to port 16514, the client certificate as the credential, the server verified against the zone's CA (banlieue ADR-0011). From the cluster to the host: a path host-resident hosts do not need.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -612,7 +612,7 @@
     },
     {
       "unique-id": "rel-libvirt-provider-kube",
-      "description": "Planned (roadmap 04): renews its Lease and writes its Provider's status, failure domain and Ready and ProviderReachable conditions.",
+      "description": "Renews its Lease and writes its Provider's status, failure domain and Ready and ProviderReachable conditions.",
       "relationship-type": {
         "connects": {
           "source": {
@@ -671,7 +671,7 @@
     },
     {
       "unique-id": "flow-add-libvirt-host",
-      "name": "Add a libvirt host to a zone (planned, roadmap 04)",
+      "name": "Add a libvirt host to a zone",
       "description": "From a new Host in a libvirt zone to a host banlieue can place VMs on (ADR-0018).",
       "transitions": [
         {
@@ -712,7 +712,7 @@
     "repository": "https://github.com/firestoned/faubourg",
     "license": "Apache-2.0",
     "calm-schema-version": "1.2",
-    "phase": "Roadmaps 00 to 02 done, 03 in progress: Cloud Hypervisor hosts, bootstrap, zone health, cordon and drain. Roadmap 04 (ADR-0018) adds libvirt and Firecracker zones; what it adds is marked planned."
+    "phase": "Roadmaps 00 to 02 done, 03 and 04 in progress: Cloud Hypervisor and libvirt zones, bootstrap, zone health, cordon and drain. Firecracker (roadmap 04 phase D) is marked planned."
   },
   "adrs": [
     "docs/adr/0001-record-architecture-decisions.md",

@@ -23,6 +23,8 @@ use banlieue_api::banlieue::{
 };
 use banlieue_api::common::LocalObjectReference;
 use faubourg_api::LABEL_HOST;
+
+use crate::backend::Backend;
 use faubourg_api::host::{Host, Maintenance};
 use kube::ResourceExt;
 
@@ -59,6 +61,9 @@ pub struct DrainInput<'a> {
     pub provider: Option<&'a str>,
     /// Whether the cluster serves `VirtualMachineMove` (and `VirtualMachine`).
     pub moves_served: bool,
+    /// The backend driving the host, when faubourg drives its zone's class (ADR-0018). banlieue
+    /// moves VMs only between hosts of some backends (decision 9).
+    pub backend: Option<Backend>,
     /// Every banlieue VM, in every namespace.
     pub vms: &'a [VirtualMachine],
     /// The moves labelled with this Host's name, in every namespace.
@@ -106,6 +111,15 @@ pub fn plan(i: &DrainInput<'_>) -> DrainPlan {
             REASON_MOVES_UNSUPPORTED,
             "the cluster serves no VirtualMachineMove (banlieue v0.5.7 or later); nothing is moved"
                 .into(),
+        );
+    }
+    if let Some(b) = i.backend.filter(|b| !b.moves_vms()) {
+        return blocked_by(
+            REASON_MOVES_UNSUPPORTED,
+            format!(
+                "banlieue does not move VMs between {} hosts; the host is cordoned, nothing is moved",
+                b.name()
+            ),
         );
     }
     let Some(provider) = i.provider else {
@@ -341,6 +355,7 @@ mod tests {
             host_ready: true,
             provider: Some("hv01"),
             moves_served: true,
+            backend: Some(Backend::CloudHypervisor),
             vms,
             moves,
         }
@@ -504,6 +519,21 @@ mod tests {
         let p = plan(&i);
         assert_eq!(p.create.len(), 0);
         assert_eq!(drained(&p), (false, REASON_MOVES_UNSUPPORTED));
+    }
+
+    /// ADR-0018 decision 9: banlieue moves only Cloud Hypervisor VMs, so a libvirt host's drain
+    /// cordons it and says nothing will move.
+    #[test]
+    fn a_backend_banlieue_cannot_move_creates_nothing_and_says_so() {
+        let h = host("Drain");
+        let vms = [vm("apps", "web-0", "hv01")];
+        let mut i = input(&h, &vms, &[]);
+        i.backend = Some(Backend::Libvirt);
+        let p = plan(&i);
+        assert_eq!(p.create.len(), 0);
+        let d = p.drained.unwrap();
+        assert_eq!((d.status, d.reason), (false, REASON_MOVES_UNSUPPORTED));
+        assert!(d.message.contains("libvirt"), "{}", d.message);
     }
 
     /// Decision 6: a move needs both hosts alive; a host that is not Ready is not drained.

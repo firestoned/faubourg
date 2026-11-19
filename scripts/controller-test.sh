@@ -77,6 +77,7 @@ kubectl create --dry-run=client -o json -f "$ROOT/deploy/admission/bootstrap-pol
   | jq -c --arg img "$IMAGE" --arg src "$SOURCES" '.data.image = $img | .data.scriptSources = $src' \
   | kubectl apply -f - >/dev/null
 kubectl apply -f "$ROOT/deploy/admission/bootstrap-policy.yaml" >/dev/null
+kubectl apply -f "$ROOT/deploy/admission/provider-connection-policy.yaml" >/dev/null
 kubectl -n "$CREDS" create secret generic hv01-ssh --from-literal=username=faubourg >/dev/null
 kubectl -n "$CREDS" create configmap faubourg-install --from-literal=install.sh='#!/bin/sh' >/dev/null
 kubectl apply -f - >/dev/null <<'JSON'
@@ -325,6 +326,31 @@ kubectl patch providerclass cloud-hypervisor --type=merge -p '{"spec": {"deploym
 eventually "a class put right lets the Host through" 30 phase_is hv05 Pending AwaitingProviderIdentity
 kubectl delete host hv05 >/dev/null
 kubectl apply -f - >/dev/null <<'JSON'
+{"apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass", "metadata": {"name": "firecracker"},
+ "spec": {"backend": "firecracker", "deployment": "External"}}
+JSON
+kubectl apply -f - >/dev/null <<'JSON'
+{"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "AvailabilityZone",
+ "metadata": {"name": "az-fc"}, "spec": {"providerClassRef": {"name": "firecracker"}}}
+JSON
+host hv14 az-fc hv14.home.example None
+eventually "a host of a backend with no driver yet is refused" 30 phase_is hv14 Failed ProviderBackendUnsupported
+eventually "and so is its zone" 30 zone_reason az-fc ProviderBackendUnsupported
+if out="$(kubectl patch availabilityzone az-fc --type=merge \
+  -p '{"spec": {"providerClassRef": {"name": "cloud-hypervisor"}}}' 2>&1)"; then
+  fail "a zone's class is immutable" "changed"
+elif grep -qF "cannot change" <<<"$out"; then pass "a zone's class cannot change"
+else fail "a zone's class is immutable" "refused for another reason: $out"; fi
+if out="$(kubectl patch availabilityzone az-fc --type=json \
+  -p '[{"op": "remove", "path": "/spec/providerClassRef"}]' 2>&1)"; then
+  fail "a zone's class cannot go" "removed"
+elif grep -qF "cannot change" <<<"$out"; then pass "nor be removed"
+else fail "a zone's class cannot go" "refused for another reason: $out"; fi
+kubectl delete host hv14 >/dev/null
+kubectl delete availabilityzone az-fc >/dev/null
+
+echo "--- a libvirt zone (ADR-0018 decisions 6 to 9)"
+kubectl apply -f - >/dev/null <<'JSON'
 {"apiVersion": "banlieue.io/v1alpha1", "kind": "ProviderClass", "metadata": {"name": "libvirt"},
  "spec": {"backend": "libvirt", "image": {"repository": "registry.internal:5000/banlieue", "tag": "v0.0.0"}}}
 JSON
@@ -332,20 +358,66 @@ kubectl apply -f - >/dev/null <<'JSON'
 {"apiVersion": "faubourg.firestoned.io/v1alpha1", "kind": "AvailabilityZone",
  "metadata": {"name": "az-kvm"}, "spec": {"providerClassRef": {"name": "libvirt"}}}
 JSON
-host hv14 az-kvm hv14.home.example None
-eventually "a host of a backend with no driver yet is refused" 30 phase_is hv14 Failed ProviderBackendUnsupported
-eventually "and so is its zone" 30 zone_reason az-kvm ProviderBackendUnsupported
-if out="$(kubectl patch availabilityzone az-kvm --type=merge \
-  -p '{"spec": {"providerClassRef": {"name": "cloud-hypervisor"}}}' 2>&1)"; then
-  fail "a zone's class is immutable" "changed"
-elif grep -qF "cannot change" <<<"$out"; then pass "a zone's class cannot change"
-else fail "a zone's class is immutable" "refused for another reason: $out"; fi
-if out="$(kubectl patch availabilityzone az-kvm --type=json \
-  -p '[{"op": "remove", "path": "/spec/providerClassRef"}]' 2>&1)"; then
-  fail "a zone's class cannot go" "removed"
-elif grep -qF "cannot change" <<<"$out"; then pass "nor be removed"
-else fail "a zone's class cannot go" "refused for another reason: $out"; fi
-kubectl delete host hv14 >/dev/null
+host kvm01 az-kvm kvm01.home.example Script
+eventually "a libvirt zone without its connection fails its hosts" 30 phase_is kvm01 Failed ProviderConnectionInvalid
+eventually "and says so itself" 30 zone_reason az-kvm ProviderConnectionInvalid
+never "and its host gets no Provider" 5 kubectl -n "$BANLIEUE" get provider kvm01
+kubectl patch availabilityzone az-kvm --type=merge -p '{"spec": {"libvirt": {
+  "credentialsRef": {"name": "faubourg-kvm-client"}, "caBundleRef": {"name": "faubourg-kvm-ca"}}}}' >/dev/null
+connection_is() { # provider, endpoint, credential
+  kubectl -n "$BANLIEUE" get provider "$1" -o json | jq -e --arg e "$2" --arg c "$3" '
+    .spec.connection.endpoint == $e and .spec.connection.credentialsRef.name == $c
+    and .spec.connection.caBundle.configMapRef.name == "faubourg-kvm-ca"
+    and (.spec.connection.insecureSkipTLSVerify // false) == false'
+}
+eventually "faubourg creates the libvirt Provider with the zone's connection, past the policy" 60 \
+  connection_is kvm01 qemu+tls://kvm01.home.example/system faubourg-kvm-client
+eventually "its Job is created without waiting for an identity" 60 job_exists bootstrap-kvm01-g1
+libvirt_job_mints_nothing() {
+  local j
+  j="$(kubectl -n "$CREDS" get job bootstrap-kvm01-g1 -o json)"
+  jq -e '[.spec.template.spec.volumes[].name] | (index("kube-api") == null and index("provider-ca") == null)' \
+    <<<"$j" >/dev/null \
+    && jq -e '.spec.template.spec.containers[0].env | all(.name | startswith("FAUBOURG_PROVIDER") | not)' \
+      <<<"$j" >/dev/null
+}
+if libvirt_job_mints_nothing; then pass "and it mints nothing: no API access, no provider variables"
+else fail "the libvirt Job" "carries API access or provider variables"; fi
+kubectl delete host kvm01 >/dev/null
+libvirt_provider() { # name, ProviderReachable status
+  jq -nc --arg n "$1" --arg ns "$BANLIEUE" '{apiVersion: "banlieue.io/v1alpha1", kind: "Provider",
+    metadata: {name: $n, namespace: $ns},
+    spec: {providerClassRef: {name: "libvirt"},
+           connection: {endpoint: ("qemu+tls://" + $n + ".home.example/system"),
+                        credentialsRef: {name: "faubourg-kvm-client"}}}}' | kubectl apply -f - >/dev/null
+  local gen
+  gen="$(kubectl -n "$BANLIEUE" get provider "$1" -o jsonpath='{.metadata.generation}')"
+  jq -nc --argjson g "$gen" --arg r "$2" --arg ns "$BANLIEUE" '{status: {
+    conditions: [
+      {type: "Ready", status: "True", reason: "Test", message: "", observedGeneration: $g,
+       lastTransitionTime: "2026-11-07T00:00:00Z"},
+      {type: "ProviderReachable", status: $r, reason: "Test", message: "", observedGeneration: $g,
+       lastTransitionTime: "2026-11-07T00:00:00Z"}],
+    workload: {mode: "Managed", namespace: $ns, heartbeat: "Alive"}}}' \
+    | kubectl -n "$BANLIEUE" patch provider "$1" --subresource=status --type=merge --patch-file=/dev/stdin >/dev/null
+}
+label_is() { # provider, label key, value
+  [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o json | jq -r --arg k "$2" '.metadata.labels[$k] // ""')" = "$3" ]
+}
+libvirt_provider kvm02 False
+host kvm02 az-kvm kvm02.home.example None
+eventually "an adopted libvirt host is labelled" 30 label_is kvm02 faubourg.firestoned.io/host kvm02
+never "and is not Ready on a pod's heartbeat while its provider cannot reach it" 5 phase_is kvm02 Ready
+libvirt_provider kvm02 True
+eventually "it is Ready once its provider reaches it" 30 phase_is kvm02 Ready ProviderHealthy
+libvirt_provider kvm02 False
+eventually "and Degraded when it no longer does" 30 phase_is kvm02 Degraded ProviderUnreachable
+libvirt_provider kvm02 True
+eventually "and Ready again" 30 phase_is kvm02 Ready ProviderHealthy
+kubectl patch host kvm02 --type=merge -p '{"spec": {"maintenance": "Drain"}}' >/dev/null
+eventually "a libvirt drain moves nothing and says so" 30 condition_is kvm02 Drained False MovesUnsupported
+eventually "but cordons the host" 30 label_is kvm02 banlieue.io/unschedulable true
+kubectl delete host kvm02 >/dev/null
 kubectl delete availabilityzone az-kvm >/dev/null
 
 echo "--- one machine, one Host (ADR-0018 decision 10)"

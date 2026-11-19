@@ -14,7 +14,7 @@
 //!   one: a valid spec in a supported zone. A failed current Job is kept, never replaced
 //!   (decision 7).
 
-use banlieue_api::banlieue::{Provider, ProviderClass};
+use banlieue_api::banlieue::{Provider, ProviderClass, ProviderDeployment};
 use faubourg_api::host::{
     BootstrapMethod, Host, HostKeyPolicy, HostPhase, HostStatus, REASON_INVALID_NAME,
 };
@@ -24,11 +24,14 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
-use crate::backend::{Backend, REASON_BACKEND_UNSUPPORTED, REASON_CLASS_MISMATCH, class_name};
+use crate::backend::{
+    Backend, REASON_BACKEND_UNSUPPORTED, REASON_CLASS_MISMATCH, REASON_CONNECTION_INVALID,
+    class_name,
+};
 use crate::drain::{CONDITION_DRAINED, Drained};
 use crate::health::ProviderHealth;
 use crate::job::{
-    BootstrapConfig, JobError, LABEL_REBOOTSTRAP, bootstrap_job, job_generation, job_inputs,
+    BootstrapConfig, JobError, LABEL_REBOOTSTRAP, bootstrap_job_for, job_generation, job_inputs,
     job_state, owned_by, reported_host_key, with_provider_identity,
 };
 use crate::phase::{Decision, JobState, Observed, REASON_AWAITING_JOB, ZoneState, decide};
@@ -110,6 +113,9 @@ pub struct Plan {
     /// Host's class and endpoint, or an existing spec moved off the labels' manager
     /// (ADR-0011, amended).
     pub apply_provider_spec: Option<serde_json::Value>,
+    /// The backend that drives the Host, when its zone's class is one faubourg drives
+    /// (ADR-0018). The drain reads it: only some backends' VMs can be moved (decision 9).
+    pub backend: Option<Backend>,
 }
 
 /// Why no plan was made: the Host was not read from an API server.
@@ -123,8 +129,13 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
     let uid = host.metadata.uid.as_deref().ok_or(NotPersisted("uid"))?;
     let generation = host.metadata.generation.ok_or(NotPersisted("generation"))?;
 
+    let class = class_name(w.zone, &w.cfg.provider.class);
+    let backend = Backend::of(class, w.class);
+    // Only a provider that runs on the host gets a token, and so needs banlieue to have given
+    // its Provider an identity first (ADR-0011 decision 2, ADR-0018 decision 7).
+    let mints = backend.as_ref().map_or(true, |b| b.mints_token());
     let owned: Vec<&Job> = w.jobs.iter().filter(|j| owned_by(j, uid)).collect();
-    let (desired, refusal) = match bootstrap_job(host, w.cfg, w.pins) {
+    let (desired, refusal) = match bootstrap_job_for(host, w.cfg, w.pins, mints) {
         Ok(job) => (Some(job), None),
         // The phase machine reports these itself.
         Err(JobError::NotScript | JobError::InvalidSpec(_)) => (None, None),
@@ -146,15 +157,13 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
     let zone = zone_state(w.zone);
     let script = host.spec.bootstrap.method == BootstrapMethod::Script;
     let valid = host.spec.validate().is_ok();
-    let identity = identity_ready(w.own_provider);
+    let identity = !mints || identity_ready(w.own_provider);
     // A held re-bootstrap keeps running what it has: judge it by its last success.
     let judged = if hold.is_some() {
         JobState::Succeeded
     } else {
         job
     };
-    let class = class_name(w.zone, &w.cfg.provider.class);
-    let backend = Backend::of(class, w.class);
     let (refusal, decision) = phase(w, refusal, judged, zone, identity, class, &backend);
     let (apply_provider_spec, apply_provider) = match (&backend, valid && refusal.is_none()) {
         (Ok(b), true) => provider_bodies(w, script, *b, class),
@@ -197,7 +206,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         [one] => one.metadata.name.clone(),
         _ => None,
     };
-    let create = create.and_then(|j| finish(j, w.own_provider, rebootstrap));
+    let create = create.and_then(|j| finish(j, w.own_provider, rebootstrap, mints));
     let bootstrap = (script && want.is_some()).then_some(bootstrap_condition(job, hold));
     let status = status(
         host.status.as_ref(),
@@ -221,6 +230,7 @@ pub fn plan(w: &World<'_>) -> Result<Plan, NotPersisted> {
         decision,
         apply_provider,
         apply_provider_spec,
+        backend: backend.ok(),
     })
 }
 
@@ -317,6 +327,17 @@ fn phase(
                     message: why.clone(),
                 })
             })
+            .or_else(|| {
+                backend
+                    .as_ref()
+                    .ok()
+                    .and_then(|b| b.check_zone(w.zone).err())
+                    .map(|why| Decision {
+                        phase: HostPhase::Failed,
+                        reason: REASON_CONNECTION_INVALID,
+                        message: why,
+                    })
+            })
             .or_else(|| class_mismatch(w.own_provider, class))
     });
     let mut decision = refusal.clone().unwrap_or_else(|| {
@@ -325,7 +346,12 @@ fn phase(
             previous: host.status.as_ref().and_then(|s| s.phase),
             zone,
             job,
-            provider: ProviderHealth::of_labelled(w.providers),
+            provider: ProviderHealth::of_labelled_as(
+                w.providers,
+                backend
+                    .as_ref()
+                    .map_or(ProviderDeployment::External, |b| b.deployment()),
+            ),
         })
     });
     // No Job until banlieue's operator has given the Provider its identity (decision 2).
@@ -378,15 +404,23 @@ fn class_mismatch(own: Option<&Provider>, class: &str) -> Option<Decision> {
     })
 }
 
-/// The Job to create, completed: the `ServiceAccount` banlieue published for the host's Provider
-/// (banlieue ADR-0126; the identity gate holds until it has), and the re-bootstrap mark the
-/// rollout counts (ADR-0013 decision 5).
-fn finish(mut job: Job, own_provider: Option<&Provider>, rebootstrap: bool) -> Option<Job> {
+/// The Job to create, completed: for a backend that mints a token, the `ServiceAccount` banlieue
+/// published for the host's Provider (banlieue ADR-0126; the identity gate holds until it has),
+/// and for every Job the re-bootstrap mark the rollout counts (ADR-0013 decision 5).
+fn finish(
+    mut job: Job,
+    own_provider: Option<&Provider>,
+    rebootstrap: bool,
+    mints: bool,
+) -> Option<Job> {
     if rebootstrap {
         job.metadata
             .labels
             .get_or_insert_default()
             .insert(LABEL_REBOOTSTRAP.into(), "true".into());
+    }
+    if !mints {
+        return Some(job);
     }
     provider_service_account(own_provider).map(|sa| with_provider_identity(job, sa))
 }
@@ -476,7 +510,7 @@ fn provider_bodies(
     let ns = &w.cfg.provider.namespace;
     if script {
         (
-            spec_body(w.host, backend, class, ns),
+            spec_body(w.host, backend, class, w.zone, ns),
             labels_body(w.host, w.zone, ns),
         )
     } else if let Some(own) = w.own_provider {
@@ -609,7 +643,8 @@ fn condition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{ANNOTATION_INPUTS, EXIT_SCRIPT_DRIFT, job_name};
+    use crate::job::{ANNOTATION_INPUTS, EXIT_SCRIPT_DRIFT, bootstrap_job, job_name};
+    use crate::phase::REASON_PROVIDER_UNREACHABLE;
     use crate::phase::{
         REASON_JOB_FAILED, REASON_JOB_RUNNING, REASON_PROVIDER_AMBIGUOUS, REASON_PROVIDER_HEALTHY,
         REASON_SCRIPT_DRIFT, REASON_ZONE_NOT_FOUND, REASON_ZONE_UNSUPPORTED,
@@ -1525,13 +1560,13 @@ mod tests {
 
     #[test]
     fn a_class_faubourg_cannot_drive_fails_the_host_and_creates_nothing() {
-        // Missing, Managed, or a backend with no driver yet (ADR-0018 decision 2); for a
-        // bootstrapped and an adopted Host alike.
+        // Missing, in the wrong mode, or a backend with no driver yet (ADR-0018 decision 2);
+        // for a bootstrapped and an adopted Host alike.
         for h in [host(1), adopted()] {
             for class in [
                 None,
                 Some(class("Managed")),
-                Some(class_of("cloud-hypervisor", "libvirt", "Managed")),
+                Some(class_of("cloud-hypervisor", "libvirt", "External")),
                 Some(class_of("cloud-hypervisor", "firecracker", "External")),
             ] {
                 let mut f = Fixture::new(h.clone());
@@ -1579,6 +1614,110 @@ mod tests {
             assert_eq!(p.apply_provider, None, "faubourg never rewrites it");
             assert_eq!(p.apply_provider_spec, None);
         }
+    }
+
+    // ----- libvirt (ADR-0018 decisions 6 to 9) ---------------------------------------------
+
+    fn libvirt_zone() -> AvailabilityZone {
+        let mut z = zone_with_class("libvirt");
+        z.spec.libvirt = serde_json::from_value(json!({
+            "credentialsRef": { "name": "faubourg-kvm-client" },
+            "caBundleRef": { "name": "faubourg-kvm-ca" } }))
+        .unwrap();
+        z
+    }
+
+    /// A libvirt Host's fixture: its zone, a Managed libvirt class, and a Provider of that
+    /// class with no identity (banlieue gives a Managed Provider none faubourg uses).
+    fn libvirt_fixture(h: Host) -> Fixture {
+        let mut f = Fixture::new(h);
+        f.zone = Some(libvirt_zone());
+        f.class = Some(class_of("libvirt", "libvirt", "Managed"));
+        let mut own = own(false);
+        own.spec.provider_class_ref.name = "libvirt".into();
+        f.own_provider = Some(own);
+        f
+    }
+
+    /// The labelled libvirt Provider: `Ready`, a pod's `Alive` heartbeat, and `reachable`.
+    fn libvirt_provider(reachable: bool) -> Provider {
+        let mut p = provider("hv01", true);
+        let s = p.status.as_mut().unwrap();
+        s.conditions.push(
+            serde_json::from_value(json!({ "type": "ProviderReachable",
+                "status": if reachable { "True" } else { "False" }, "observedGeneration": 1,
+                "reason": "R", "message": "", "lastTransitionTime": "2026-11-07T00:00:00Z" }))
+            .unwrap(),
+        );
+        p
+    }
+
+    #[test]
+    fn a_libvirt_host_gets_the_zones_connection_and_a_job_that_mints_nothing() {
+        let p = libvirt_fixture(host(1)).plan();
+        assert_eq!(p.backend, Some(Backend::Libvirt));
+        let spec = p.apply_provider_spec.unwrap();
+        assert_eq!(spec["spec"]["providerClassRef"]["name"], "libvirt");
+        assert_eq!(
+            spec["spec"]["connection"]["endpoint"],
+            "qemu+tls://hv01.home.example/system"
+        );
+        assert_eq!(
+            spec["spec"]["connection"]["credentialsRef"]["name"],
+            "faubourg-kvm-client"
+        );
+        // No identity to wait for, and none to hand over (decision 7).
+        let j = p.create.expect("a Job without waiting for an identity");
+        let c = &j.spec.unwrap().template.spec.unwrap().containers[0];
+        let env: Vec<&str> = c.env.iter().flatten().map(|e| e.name.as_str()).collect();
+        assert!(
+            !env.contains(&crate::job::ENV_PROVIDER_SERVICE_ACCOUNT),
+            "{env:?}"
+        );
+        assert!(!env.contains(&crate::job::ENV_PROVIDER), "{env:?}");
+        let mounts: Vec<&str> = c
+            .volume_mounts
+            .iter()
+            .flatten()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(!mounts.contains(&crate::job::VOLUME_KUBE_API), "{mounts:?}");
+    }
+
+    #[test]
+    fn a_zone_whose_connection_does_not_fit_its_backend_fails_its_hosts() {
+        // A libvirt zone without spec.libvirt, and a cloud-hypervisor zone with one.
+        let mut bare = libvirt_fixture(host(1));
+        bare.zone.as_mut().unwrap().spec.libvirt = None;
+        let mut ch = Fixture::new(host(1));
+        ch.zone.as_mut().unwrap().spec.libvirt = libvirt_zone().spec.libvirt;
+        for f in [bare, ch] {
+            let p = f.plan();
+            assert_eq!(p.decision.phase, HostPhase::Failed);
+            assert_eq!(p.decision.reason, REASON_CONNECTION_INVALID);
+            assert_eq!(p.create, None);
+            assert_eq!(p.apply_provider, None);
+            assert_eq!(p.apply_provider_spec, None);
+        }
+    }
+
+    #[test]
+    fn a_libvirt_host_is_ready_only_while_its_provider_reaches_it() {
+        let mut f = libvirt_fixture(adopted());
+        f.providers = vec![libvirt_provider(false)];
+        let p = f.plan();
+        assert_ne!(
+            p.decision.phase,
+            HostPhase::Ready,
+            "a pod's Alive heartbeat is not the host's (decision 8)"
+        );
+        f.providers = vec![libvirt_provider(true)];
+        assert_eq!(f.plan().decision.phase, HostPhase::Ready);
+        f.host.status = Some(f.plan().status);
+        f.providers = vec![libvirt_provider(false)];
+        let p = f.plan();
+        assert_eq!(p.decision.phase, HostPhase::Degraded);
+        assert_eq!(p.decision.reason, REASON_PROVIDER_UNREACHABLE);
     }
 
     fn peer(name: &str, address: &str) -> Host {

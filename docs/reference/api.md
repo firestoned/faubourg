@@ -23,7 +23,9 @@ tables below.
 | `description` | string | | Free-form, for operators. |
 | `storage.mode` | `Local` \| `Shared` | `Local` | `Shared` is refused in v1 (`StorageModeUnsupported`, [ADR-0004](../adr/0004-v1-local-storage-only.md)). |
 | `providerLabels` | map | | Copied onto every member host's `Provider`. Keys under `faubourg.firestoned.io/` are refused (`ReservedLabel`); keys and values must be valid labels (`InvalidLabel`). |
-| `providerClassRef.name` | string | the controller's `--provider-class` | The banlieue `ProviderClass` every member host's `Provider` references; its `backend` decides how faubourg drives the zone's hosts ([ADR-0018](../adr/0018-a-zone-names-its-provider-class.md)). Must be an object name (`InvalidProviderClassRef`). The API server refuses a change or a removal once set; setting it on a zone that named none is allowed. Driven today: `cloud-hypervisor` (`External`). Any other backend, a mode that does not match, or a missing class is `ProviderBackendUnsupported`. |
+| `providerClassRef.name` | string | the controller's `--provider-class` | The banlieue `ProviderClass` every member host's `Provider` references; its `backend` decides how faubourg drives the zone's hosts ([ADR-0018](../adr/0018-a-zone-names-its-provider-class.md)). Must be an object name (`InvalidProviderClassRef`). The API server refuses a change or a removal once set; setting it on a zone that named none is allowed. Driven today: `cloud-hypervisor` (`External`) and `libvirt` (`Managed`). Any other backend (`firecracker` until banlieue ships it), a mode that does not match, or a missing class is `ProviderBackendUnsupported`. |
+| `libvirt.credentialsRef.name` | string | | Required for a `libvirt` zone, refused on any other (`ProviderConnectionInvalid`). A Secret in banlieue's namespace holding the client certificate (`tls.crt`, `tls.key`) libvirtd accepts, named `faubourg-...` (`InvalidLibvirtRef`). faubourg copies the name into each member's `Provider` and never reads it. |
+| `libvirt.caBundleRef.name`, `.key` | string | key `ca.crt` | The ConfigMap key, in banlieue's namespace, holding the CA that signed each host's libvirtd certificate. The name starts with `faubourg-` (`InvalidLibvirtRef`). |
 
 ### status
 
@@ -32,7 +34,7 @@ tables below.
 | `hosts` | Hosts whose `zoneRef` names this zone. |
 | `readyHosts` | Of those, hosts in phase `Ready`. |
 | `cordonedHosts` | Of the ready ones, those cordoned. |
-| `conditions` | `Ready`, and why: `StorageModeUnsupported`, `InvalidSpec`, `ProviderBackendUnsupported`, `NoHosts`, `NoReadyHost`, `AllReadyHostsCordoned` or `HostsReady` ([ADR-0015](../adr/0015-zone-controller.md)). |
+| `conditions` | `Ready`, and why: `StorageModeUnsupported`, `InvalidSpec`, `ProviderBackendUnsupported`, `ProviderConnectionInvalid`, `NoHosts`, `NoReadyHost`, `AllReadyHostsCordoned` or `HostsReady` ([ADR-0015](../adr/0015-zone-controller.md)). |
 | `observedGeneration` | The generation the conditions describe. |
 
 ## Host
@@ -70,7 +72,7 @@ escape hatch ([ADR-0005](../adr/0005-bootstrap-runs-one-scoped-install-script.md
 | `phase` | `Pending`, `Bootstrapping`, `Ready`, `Degraded` or `Failed` ([Concepts](../concepts.md#lifecycle-of-a-host)). |
 | `providerRef` | The banlieue `Provider` labelled `faubourg.firestoned.io/host: <host>`, when exactly one is. For a bootstrapped host, faubourg creates it, named after the Host. |
 | `acceptedHostKey` | The fingerprint accepted under `TrustOnFirstUse`, pinned afterwards. |
-| `conditions` | `Ready`: `True` only in phase `Ready`. Its reason says why: `AwaitingBootstrapJob`, `BootstrapJobRunning`, `BootstrapJobFailed`, `ScriptDrift`, `HostKeyRefused`, `ZoneNotFound`, `ZoneUnsupported`, `NoScriptSource`, `InvalidSpec`, `DuplicateAddress`, `ProviderBackendUnsupported`, `ProviderClassMismatch`, `AwaitingProviderIdentity`, `AwaitingProvider`, `ProviderAmbiguous`, `ProviderMissing`, `ProviderNotReady`, `HeartbeatNotAlive` or `ProviderHealthy`. |
+| `conditions` | `Ready`: `True` only in phase `Ready`. Its reason says why: `AwaitingBootstrapJob`, `BootstrapJobRunning`, `BootstrapJobFailed`, `ScriptDrift`, `HostKeyRefused`, `ZoneNotFound`, `ZoneUnsupported`, `NoScriptSource`, `InvalidSpec`, `DuplicateAddress`, `ProviderBackendUnsupported`, `ProviderConnectionInvalid`, `ProviderClassMismatch`, `AwaitingProviderIdentity`, `AwaitingProvider`, `ProviderAmbiguous`, `ProviderMissing`, `ProviderNotReady`, `HeartbeatNotAlive`, `ProviderUnreachable` (a libvirt host whose provider does not report reaching it) or `ProviderHealthy`. |
 | `observedGeneration` | The generation this status describes. |
 | `message` | Human-readable. Never contains secret material or a command line. |
 

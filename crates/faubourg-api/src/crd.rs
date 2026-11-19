@@ -371,7 +371,11 @@ mod tests {
     fn examples_parse_and_validate() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let mut seen = 0;
-        for file in ["00-availabilityzone.yaml", "01-host.yaml"] {
+        for file in [
+            "00-availabilityzone.yaml",
+            "01-host.yaml",
+            "03-libvirt-zone.yaml",
+        ] {
             let text = std::fs::read_to_string(dir.join(file)).unwrap();
             for doc in text.split("\n---\n") {
                 let v: serde_json::Value = serde_saphyr::from_str(doc).unwrap();
@@ -390,6 +394,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen, 2);
+        assert_eq!(seen, 3);
     }
 }

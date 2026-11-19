@@ -7,6 +7,9 @@
 //! Usage: `FAUBOURG_BOOTSTRAP_IMAGE=<image@sha256:...> FAUBOURG_SCRIPT_SOURCES=<scriptSources>
 //! cargo run -q -p faubourg-controller --example bootstrap-job`
 //!
+//! With `FAUBOURG_MANAGED_BACKEND=true` it prints the Job for a Managed backend's host (libvirt,
+//! ADR-0018 decision 7), which mints no token and has no API access.
+//!
 //! The image and the script pins (the bootstrap policy's `scriptSources`, ADR-0013) come from
 //! the environment, not from `argv`. The builder refuses an image not pinned by digest and a
 //! script with no pinned digest, so nothing here trusts either value.
@@ -17,7 +20,7 @@ use faubourg_api::host::{
 };
 use faubourg_api::policy::parse_policy;
 use faubourg_controller::job::{
-    BootstrapConfig, ProviderConfig, bootstrap_job, with_provider_identity,
+    BootstrapConfig, ProviderConfig, bootstrap_job_for, with_provider_identity,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,11 +70,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         max_rebootstraps: 1,
     };
-    // The name banlieue's operator would publish on the Provider (banlieue ADR-0126).
-    let job = with_provider_identity(
-        bootstrap_job(&host, &cfg, Some(&pins)).map_err(|e| e.to_string())?,
-        "banlieue-provider-cloud-hypervisor-hv01",
-    );
+    let managed = std::env::var("FAUBOURG_MANAGED_BACKEND").is_ok_and(|v| v == "true");
+    let job = bootstrap_job_for(&host, &cfg, Some(&pins), !managed).map_err(|e| e.to_string())?;
+    // The name banlieue's operator would publish on the Provider (banlieue ADR-0126); a Managed
+    // backend's Job gets none.
+    let job = if managed {
+        job
+    } else {
+        with_provider_identity(job, "banlieue-provider-cloud-hypervisor-hv01")
+    };
     println!("{}", serde_json::to_string_pretty(&job)?);
     Ok(())
 }

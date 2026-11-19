@@ -77,9 +77,16 @@ pub fn labels_body(host: &Host, zone: Option<&AvailabilityZone>, namespace: &str
 }
 
 /// The spec's apply body, under [`SPEC_MANAGER`], for a bootstrapped Host (ADR-0011 decision
-/// 2): its zone's class and the backend's endpoint for its address (ADR-0018). `None` for an
-/// adopted Host, whose spec faubourg never sets, and for a Host with no name.
-pub fn spec_body(host: &Host, backend: Backend, class: &str, namespace: &str) -> Option<Value> {
+/// 2): its zone's class and the backend's connection for its address, which for libvirt names
+/// the zone's client credential and CA (ADR-0018). `None` for an adopted Host, whose spec
+/// faubourg never sets, and for a Host with no name.
+pub fn spec_body(
+    host: &Host,
+    backend: Backend,
+    class: &str,
+    zone: Option<&AvailabilityZone>,
+    namespace: &str,
+) -> Option<Value> {
     if host.spec.bootstrap.method != BootstrapMethod::Script {
         return None;
     }
@@ -88,7 +95,7 @@ pub fn spec_body(host: &Host, backend: Backend, class: &str, namespace: &str) ->
         name,
         namespace,
         class,
-        &backend.endpoint(&host.spec.address),
+        &backend.connection(&host.spec.address, zone),
     ))
 }
 
@@ -119,18 +126,18 @@ pub fn migrated_spec_body(provider: &Provider) -> Option<Value> {
         provider.metadata.name.as_deref()?,
         provider.metadata.namespace.as_deref()?,
         &provider.spec.provider_class_ref.name,
-        &provider.spec.connection.endpoint,
+        &json!({ "endpoint": provider.spec.connection.endpoint }),
     ))
 }
 
-fn spec_apply(name: &str, namespace: &str, class: &str, endpoint: &str) -> Value {
+fn spec_apply(name: &str, namespace: &str, class: &str, connection: &Value) -> Value {
     json!({
         "apiVersion": "banlieue.io/v1alpha1",
         "kind": "Provider",
         "metadata": { "name": name, "namespace": namespace },
         "spec": {
             "providerClassRef": { "name": class },
-            "connection": { "endpoint": endpoint },
+            "connection": connection,
         },
     })
 }
@@ -196,6 +203,7 @@ mod tests {
             &host(BootstrapMethod::Script),
             Backend::CloudHypervisor,
             "cloud-hypervisor",
+            None,
             "banlieue-system",
         )
         .unwrap();
@@ -217,11 +225,41 @@ mod tests {
                 &host(BootstrapMethod::None),
                 Backend::CloudHypervisor,
                 "cloud-hypervisor",
+                None,
                 "ns"
             ),
             None,
             "never an adopted Provider's spec"
         );
+    }
+
+    #[test]
+    fn a_bootstrapped_libvirt_host_gets_the_zones_connection_and_parses_as_a_provider() {
+        let mut z = zone(&json!({}), "Local");
+        z.spec.libvirt = serde_json::from_value(json!({
+            "credentialsRef": { "name": "faubourg-kvm-client" },
+            "caBundleRef": { "name": "faubourg-kvm-ca" } }))
+        .unwrap();
+        let b = spec_body(
+            &host(BootstrapMethod::Script),
+            Backend::Libvirt,
+            "libvirt",
+            Some(&z),
+            "banlieue-system",
+        )
+        .unwrap();
+        let p: Provider = serde_json::from_value(b).unwrap();
+        let c = &p.spec.connection;
+        assert_eq!(c.endpoint, "qemu+tls://hv01.home.example/system");
+        assert_eq!(
+            c.credentials_ref.as_ref().map(|r| r.name.as_str()),
+            Some("faubourg-kvm-client")
+        );
+        let ca = c.ca_bundle.as_ref().unwrap();
+        assert_eq!(ca.source_count(), 1);
+        let cm = ca.config_map_ref.as_ref().unwrap();
+        assert_eq!(cm.name, "faubourg-kvm-ca");
+        assert!(!c.insecure_skip_tls_verify);
     }
 
     #[test]

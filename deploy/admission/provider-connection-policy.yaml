@@ -1,0 +1,61 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Provider connection admission policy (ADR-0018 decision 6). banlieue's operator grants a
+# Managed Provider's workload `get` on the Secret and ConfigMap its connection names, so whoever
+# writes a Provider's connection decides what that workload reads. This policy bounds what
+# faubourg's controller may write there:
+#
+#   - a credentialsRef only to a Secret named faubourg-..., which an operator made for faubourg,
+#     never another Provider's credential or banlieue's own;
+#   - a CA only from a ConfigMap named faubourg-..., never inline and never from a Secret;
+#   - never insecureSkipTLSVerify.
+#
+# It checks only a write that changes the connection, so faubourg's label applies to an adopted
+# Provider, whose connection the operator set, are not refused. Writes by anyone else are not
+# this policy's. It needs no parameters.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: faubourg-provider-connection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["banlieue.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["providers"]
+  matchConditions:
+    - name: from-the-controller
+      expression: "request.userInfo.username == 'system:serviceaccount:faubourg-system:faubourg-controller'"
+  variables:
+    - name: c
+      expression: "object.spec.connection"
+    - name: unchanged
+      expression: >-
+        request.operation == 'UPDATE' && oldObject != null
+        && has(oldObject.spec.connection) && oldObject.spec.connection == object.spec.connection
+  validations:
+    - expression: >-
+        variables.unchanged || !has(variables.c.credentialsRef)
+        || variables.c.credentialsRef.name.startsWith('faubourg-')
+      message: "faubourg's controller points a Provider only at a credential named faubourg-... (ADR-0018 decision 6)"
+    - expression: >-
+        variables.unchanged || !has(variables.c.caBundle)
+        || (!has(variables.c.caBundle.inline) && !has(variables.c.caBundle.secretRef)
+            && has(variables.c.caBundle.configMapRef)
+            && variables.c.caBundle.configMapRef.name.startsWith('faubourg-'))
+      message: "faubourg's controller sets a Provider's CA only from a ConfigMap named faubourg-... (ADR-0018 decision 6)"
+    - expression: >-
+        variables.unchanged || !has(variables.c.insecureSkipTLSVerify)
+        || !variables.c.insecureSkipTLSVerify
+      message: "faubourg's controller never sets insecureSkipTLSVerify (ADR-0018 decision 6)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: faubourg-provider-connection
+spec:
+  policyName: faubourg-provider-connection
+  validationActions: ["Deny"]

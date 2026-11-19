@@ -49,6 +49,42 @@ spec:
                 description: Free-form description for operators.
                 nullable: true
                 type: string
+              libvirt:
+                description: |-
+                  How banlieue's libvirt provider reaches the zone's hosts (ADR-0018 decision 6). Required
+                  for a zone whose class has backend `libvirt`, refused for any other. Both objects live in
+                  banlieue's namespace, are made by the operator, and are named `faubourg-...`; faubourg
+                  copies their names into each member's Provider and never reads them.
+                nullable: true
+                properties:
+                  caBundleRef:
+                    description: The `ConfigMap` key holding the CA that signed each host's libvirtd certificate.
+                    properties:
+                      key:
+                        default: ca.crt
+                        description: The key.
+                        type: string
+                      name:
+                        description: The `ConfigMap`'s name. Must start with `faubourg-`.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  credentialsRef:
+                    description: >-
+                      The Secret holding the client certificate (`tls.crt`, `tls.key`) libvirtd
+                      accepts.
+                    properties:
+                      name:
+                        description: The object's name. Must start with `faubourg-`.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - caBundleRef
+                - credentialsRef
+                type: object
               providerClassRef:
                 description: |-
                   The banlieue `ProviderClass` every member host's Provider references (ADR-0018). Its
