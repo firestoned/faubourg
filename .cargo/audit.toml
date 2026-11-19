@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Erick Bourgeois, faubourg
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-audit's configuration (CI runs `cargo audit --deny warnings`). Keep this list in step
+# with `[advisories] ignore` in deny.toml: each entry names why the advisory cannot reach a
+# faubourg binary, and when to drop it.
+
+[advisories]
+ignore = [
+  # chrono is unmaintained, no fixed version. It reaches the tree only through russh-util
+  # (russh), as a cfg(target_arch = "wasm32") dependency, which no faubourg target compiles.
+  # Drop this entry when russh-util stops depending on chrono.
+  "RUSTSEC-2026-0543",
+]
