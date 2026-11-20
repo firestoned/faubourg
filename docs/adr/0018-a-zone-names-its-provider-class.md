@@ -135,3 +135,20 @@ Settled by the maintainer on 2026-11-18, when the ADR was accepted:
   reconcile that resolves names would depend on DNS at the time it runs.
 - Whether banlieue should publish a Provider's backend kind in its status, so faubourg need not
   read the ProviderClass, is left to banlieue. faubourg reads the class until it does.
+
+*Amended 2026-11-19, after the first live test of a libvirt zone:* banlieue's own admission
+policy, `banlieue-provider-credentialsref-authorization` (its security review CHAIN-001), refuses
+any create or update of a Provider that names a credential unless the writer may `get` that
+Secret. faubourg's controller reads no Secret (ADR-0008, decision 6 above), so on a real banlieue
+it can neither create nor label a libvirt Provider; the kind tests had not installed banlieue's
+policy. Two consequences:
+
+- A Provider write the API server refuses (at admission, or by RBAC) fails the Host with reason
+  `ProviderApplyRefused` and the API server's message, instead of retrying with no status; it is
+  tried again after the retry interval. `controller-test` installs banlieue's policy (vendored in
+  `test/banlieue/`).
+- Decision 6 depends on banlieue ADR-0157 (Proposed): a write that leaves `spec.connection`
+  unchanged is not checked, and `reference` on a Secret is enough to name it. When banlieue ships
+  it, faubourg's controller is granted `reference` on Secrets in banlieue's namespace, still
+  bounded to `faubourg-` names by `faubourg-provider-connection`, and this note says so. Until
+  then libvirt zones are refused on a cluster that runs banlieue's policy.

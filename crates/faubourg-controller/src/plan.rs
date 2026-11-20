@@ -60,6 +60,11 @@ pub const REASON_IMAGE_NOT_PINNED: &str = "ImageNotPinned";
 pub const REASON_SCRIPT_NOT_PINNED: &str = "ScriptNotPinned";
 /// Reason: another Host has the same literal address (ADR-0018 decision 10).
 pub const REASON_DUPLICATE_ADDRESS: &str = "DuplicateAddress";
+/// Reason: the API server refused faubourg's write of the host's Provider, at admission or by
+/// RBAC; the message is the API server's (it names objects, never a Secret's content).
+pub const REASON_PROVIDER_APPLY_REFUSED: &str = "ProviderApplyRefused";
+/// At most this much of the API server's refusal is kept in the Host's status.
+const MAX_REFUSAL_MESSAGE: usize = 512;
 
 /// Everything one reconcile reads.
 #[derive(Clone, Copy, Debug)]
@@ -91,6 +96,9 @@ pub struct World<'a> {
     pub now: &'a Time,
     /// The drain's `Drained` condition, while the Host is draining (ADR-0017 decision 4).
     pub drained: Option<&'a Drained>,
+    /// Why the API server refused this pass's write of the host's Provider, when it did: the
+    /// reconcile is planned again with it, so the Host says so instead of retrying in silence.
+    pub provider_refused: Option<&'a str>,
 }
 
 /// What one reconcile does.
@@ -319,7 +327,16 @@ fn phase(
         if !valid {
             return None;
         }
-        duplicate_address(host, w.peers)
+        w.provider_refused
+            .map(|why| Decision {
+                phase: HostPhase::Failed,
+                reason: REASON_PROVIDER_APPLY_REFUSED,
+                message: format!(
+                    "the API server refused the host's Provider: {}",
+                    truncate(why, MAX_REFUSAL_MESSAGE)
+                ),
+            })
+            .or_else(|| duplicate_address(host, w.peers))
             .or_else(|| {
                 backend.as_ref().err().map(|why| Decision {
                     phase: HostPhase::Failed,
@@ -363,6 +380,15 @@ fn phase(
         };
     }
     (refusal, decision)
+}
+
+/// At most `max` bytes of `s`, cut at a character boundary.
+fn truncate(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// `DuplicateAddress`: another Host, not being deleted, has the same `spec.address`, compared
@@ -798,6 +824,7 @@ mod tests {
         peers: Vec<Host>,
         now: Time,
         drained: Option<Drained>,
+        provider_refused: Option<String>,
     }
 
     impl Fixture {
@@ -819,6 +846,7 @@ mod tests {
                 peers: vec![],
                 now: at(1_000),
                 drained: None,
+                provider_refused: None,
             }
         }
 
@@ -837,6 +865,7 @@ mod tests {
                 peers: &self.peers,
                 now: &self.now,
                 drained: self.drained.as_ref(),
+                provider_refused: self.provider_refused.as_deref(),
             })
             .unwrap()
         }
@@ -1194,6 +1223,7 @@ mod tests {
             peers: &f.peers,
             now: &f.now,
             drained: None,
+            provider_refused: None,
         });
         assert_eq!(r, Err(NotPersisted("uid")));
     }
@@ -1718,6 +1748,35 @@ mod tests {
         let p = f.plan();
         assert_eq!(p.decision.phase, HostPhase::Degraded);
         assert_eq!(p.decision.reason, REASON_PROVIDER_UNREACHABLE);
+    }
+
+    #[test]
+    fn a_provider_the_api_server_refuses_fails_the_host_and_says_why() {
+        // Found live: banlieue's credentialsRef policy refused faubourg's apply, and the Host had
+        // no status at all while the controller retried.
+        for h in [host(1), adopted()] {
+            let mut f = libvirt_fixture(h);
+            f.provider_refused = Some(format!(
+                "spec.connection.credentialsRef names Secret faubourg-kvm-client {}",
+                "x".repeat(2_000)
+            ));
+            let p = f.plan();
+            assert_eq!(p.decision.phase, HostPhase::Failed);
+            assert_eq!(p.decision.reason, REASON_PROVIDER_APPLY_REFUSED);
+            assert!(p.decision.message.contains("faubourg-kvm-client"));
+            assert!(p.decision.message.len() < 600, "the refusal is bounded");
+            assert!(p.status_changed, "the status is written");
+            assert_eq!(
+                p.create, None,
+                "no Job for a host whose Provider was refused"
+            );
+            assert_eq!(
+                p.apply_provider, None,
+                "the refused write is not planned again"
+            );
+            assert_eq!(p.apply_provider_spec, None);
+        }
+        assert_eq!(truncate("héllo", 2), "h", "never cut inside a character");
     }
 
     fn peer(name: &str, address: &str) -> Host {
