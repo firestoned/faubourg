@@ -298,6 +298,12 @@ expect_can yes "watch Providers in banlieue's namespace" watch providers.banlieu
 expect_can yes "label a Provider (ADR-0011)" patch providers.banlieue.io -n banlieue-system
 expect_can no "delete a Provider" delete providers.banlieue.io -n banlieue-system
 expect_can no "read a Secret in banlieue's namespace" get secrets -n banlieue-system
+expect_can no "list Secrets in banlieue's namespace" list secrets -n banlieue-system
+expect_can no "watch Secrets in banlieue's namespace" watch secrets -n banlieue-system
+expect_can yes "reference a Secret in a Provider's connection (ADR-0018, banlieue ADR-0157)" \
+  reference secrets/faubourg-kvm-client -n banlieue-system
+expect_can no "reference a Secret in the credentials namespace" reference secrets/hv01-ssh -n "$CREDS"
+expect_can no "reference a Secret anywhere else" reference secrets -n kube-system
 
 echo "--- provider tokens (ADR-0011)"
 BOOT=system:serviceaccount:faubourg-credentials:faubourg-bootstrap

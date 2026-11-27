@@ -24,7 +24,9 @@ parameters and the controller's environment, written by the same render.
 
 faubourg needs banlieue v0.5.5 or later: it reads each host's provider ServiceAccount name
 from the Provider's status, which older banlieue does not publish. With an older banlieue,
-bootstrapped Hosts wait at `AwaitingProviderIdentity`; adopted ones are unaffected.
+bootstrapped Hosts wait at `AwaitingProviderIdentity`; adopted ones are unaffected. libvirt
+zones need banlieue v0.6.0 or later (banlieue ADR-0157); with an older banlieue a libvirt Host
+fails with `ProviderApplyRefused`.
 
 ## 1. Verify the release
 

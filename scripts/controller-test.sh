@@ -384,27 +384,34 @@ libvirt_provider() { # name, ProviderReachable status
 label_is() { # provider, label key, value
   [ "$(kubectl -n "$BANLIEUE" get provider "$1" -o json | jq -r --arg k "$2" '.metadata.labels[$k] // ""')" = "$3" ]
 }
-# banlieue's own policy (v0.5.7): whoever writes a Provider naming a credential must be able to
-# read it, and faubourg's controller reads no Secret. Until banlieue ADR-0157 ships, faubourg can
-# neither create nor label a libvirt Provider, and says so on the Host.
+# banlieue's own policy (v0.6.1, banlieue ADR-0157): whoever sets or changes a Provider's
+# connection must be able to get or `reference` the Secret it names. faubourg's controller reads
+# no Secret; it holds `reference` on Secrets in banlieue's namespace, and its own
+# faubourg-provider-connection policy bounds what it names (ADR-0018, amended).
+as_controller=system:serviceaccount:faubourg-system:faubourg-controller
+if [ "$(kubectl auth can-i reference secrets -n "$BANLIEUE" --as="$as_controller" 2>/dev/null || true)" = yes ] \
+  && [ "$(kubectl auth can-i get secrets -n "$BANLIEUE" --as="$as_controller" || true)" = no ]; then
+  pass "the controller may reference Secrets in banlieue's namespace, and still read none"
+else fail "the controller's Secret grant" "is not reference-only"; fi
+# Without that grant, banlieue refuses the libvirt Provider, and the Host says why.
+kubectl -n "$BANLIEUE" delete rolebinding faubourg-controller-provider-credentials >/dev/null
 kubectl patch availabilityzone az-kvm --type=merge -p '{"spec": {"libvirt": {
   "credentialsRef": {"name": "faubourg-kvm-client"}, "caBundleRef": {"name": "faubourg-kvm-ca"}}}}' >/dev/null
-eventually "banlieue refuses faubourg's libvirt Provider, and the Host says why" 60 \
+eventually "without reference, banlieue refuses faubourg's libvirt Provider, and the Host says why" 60 \
   phase_is kvm01 Failed ProviderApplyRefused
 never "and gets no Job" 5 job_exists bootstrap-kvm01-g1
 libvirt_provider kvm02 False
 host kvm02 az-kvm kvm02.home.example None
-eventually "banlieue refuses even labelling an adopted libvirt Provider" 60 \
-  phase_is kvm02 Failed ProviderApplyRefused
-# The rest runs as banlieue ADR-0157 will allow it, with banlieue's binding removed for now.
-kubectl delete validatingadmissionpolicybinding banlieue-provider-credentialsref-authorization >/dev/null
+eventually "but labelling an adopted libvirt Provider moves no credential, and is admitted" 60 \
+  label_is kvm02 faubourg.firestoned.io/host kvm02
+kubectl apply -f "$ROOT/deploy/rbac/controller.yaml" >/dev/null
 connection_is() { # provider, endpoint, credential
   kubectl -n "$BANLIEUE" get provider "$1" -o json | jq -e --arg e "$2" --arg c "$3" '
     .spec.connection.endpoint == $e and .spec.connection.credentialsRef.name == $c
     and .spec.connection.caBundle.configMapRef.name == "faubourg-kvm-ca"
     and (.spec.connection.insecureSkipTLSVerify // false) == false'
 }
-eventually "once allowed, faubourg creates the libvirt Provider with the zone's connection, past its own policy" 90 \
+eventually "with reference, faubourg creates the libvirt Provider with the zone's connection, past both policies" 90 \
   connection_is kvm01 qemu+tls://kvm01.home.example/system faubourg-kvm-client
 eventually "its Job is created without waiting for an identity" 60 job_exists bootstrap-kvm01-g1
 libvirt_job_mints_nothing() {
@@ -418,7 +425,6 @@ libvirt_job_mints_nothing() {
 if libvirt_job_mints_nothing; then pass "and it mints nothing: no API access, no provider variables"
 else fail "the libvirt Job" "carries API access or provider variables"; fi
 kubectl delete host kvm01 >/dev/null
-eventually "the adopted libvirt host is labelled" 60 label_is kvm02 faubourg.firestoned.io/host kvm02
 never "and is not Ready on a pod's heartbeat while its provider cannot reach it" 5 phase_is kvm02 Ready
 libvirt_provider kvm02 True
 eventually "it is Ready once its provider reaches it" 30 phase_is kvm02 Ready ProviderHealthy
@@ -431,7 +437,6 @@ eventually "a libvirt drain moves nothing and says so" 30 condition_is kvm02 Dra
 eventually "but cordons the host" 30 label_is kvm02 banlieue.io/unschedulable true
 kubectl delete host kvm02 >/dev/null
 kubectl delete availabilityzone az-kvm >/dev/null
-kubectl apply -f "$ROOT/test/banlieue/provider-credentialsref-authorization.yaml" >/dev/null
 
 echo "--- one machine, one Host (ADR-0018 decision 10)"
 host hv15 az1 hv15.home.example None
