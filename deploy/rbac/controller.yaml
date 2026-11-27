@@ -5,12 +5,13 @@
 # (ADR-0005, ADR-0006, ADR-0008 decision 6).
 #
 # The controller can create and delete Jobs in the credentials namespace and read Jobs and
-# Pods there (for the termination message that carries ScriptDrift). It has nothing on
-# Secrets, Pod subresources (exec, attach, port-forward) or the admission policy objects,
-# anywhere, and reads one ConfigMap: the policy's parameters, by name (ADR-0013). In its own
+# Pods there (for the termination message that carries ScriptDrift). It reads no Secret
+# anywhere, and has nothing on Pod subresources (exec, attach, port-forward) or the admission
+# policy objects; it reads one ConfigMap: the policy's parameters, by name (ADR-0013). In its own
 # namespace it holds one Lease, to elect a leader (ADR-0014). What its Jobs may contain is decided by the admission policy, not by
 # this file. In banlieue's namespace it creates, labels and reads the hosts' Providers
-# (ADR-0011 decision 7), and nothing else: it never mints a token. The bootstrap pods mint
+# (ADR-0011 decision 7) and may `reference` (never read) the Secrets a libvirt Provider names
+# (ADR-0018, amended), and nothing else: it never mints a token. The bootstrap pods mint
 # the first provider token there, bounded by the faubourg-provider-tokens policy.
 # Rename `banlieue-system` below if banlieue runs elsewhere, and pass the same name as
 # --provider-namespace.
@@ -128,6 +129,38 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: faubourg-controller-providers
+subjects:
+  - kind: ServiceAccount
+    name: faubourg-controller
+    namespace: faubourg-system
+---
+# `reference` on Secrets in banlieue's namespace (ADR-0018, amended; banlieue ADR-0157): a
+# custom verb that nothing in Kubernetes implements and that reads nothing. banlieue's
+# banlieue-provider-credentialsref-authorization policy accepts it in place of `get` from
+# whoever sets or changes a Provider's connection, so the controller can create a libvirt
+# Provider that names the zone's client credential without being able to read it. RBAC cannot
+# bound it by prefix; faubourg-provider-connection does: the controller may name only a
+# `faubourg-` Secret and a `faubourg-` CA ConfigMap, and never skip TLS verification. Still no
+# `get`, `list` or `watch` on any Secret, here or anywhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faubourg-controller-provider-credentials
+  namespace: banlieue-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["reference"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faubourg-controller-provider-credentials
+  namespace: banlieue-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faubourg-controller-provider-credentials
 subjects:
   - kind: ServiceAccount
     name: faubourg-controller

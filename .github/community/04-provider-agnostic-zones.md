@@ -8,7 +8,7 @@ through a driver chosen by the class's `backend`. Each Host is still one Provide
 banlieue failure domain; the zone is still a label on those failure domains. ADD cycle per item.
 
 **Status: in progress.** ADR-0018 Accepted 2026-11-18; CALM updated. Phases B (the driver seam)
-and C (libvirt) done, but for C's live run; Firecracker is planned. Firecracker (phase D) is gated on
+and C (libvirt) done, but for C's live run (unblocked by banlieue ADR-0157 on 2026-11-27); Firecracker is planned. Firecracker (phase D) is gated on
 banlieue's Firecracker provider (banlieue roadmap 20); phases B and C do not wait for it.
 
 ## Backends in scope
@@ -81,11 +81,14 @@ need per-failure-domain labels and cordon in banlieue first.
       Job's whole difference
 - [x] A Provider write the API server refuses fails the Host (`ProviderApplyRefused`);
       `controller-test` runs with banlieue's credentialsRef policy installed
-- [ ] banlieue ADR-0157 (Proposed 2026-11-19) shipped, then faubourg's controller granted
-      `reference` on Secrets in banlieue's namespace, and ADR-0018's amendment closed
-- [ ] Live: one libvirt host adopted, then bootstrapped from nothing (R-17). First attempt
-      2026-11-19, adopting a libvirt Provider on the core cluster: refused by banlieue's
-      credentialsRef policy, which the kind tests did not install
+- [x] banlieue ADR-0157 (Accepted 2026-11-22, shipped in banlieue v0.6.0) taken up:
+      `banlieue-api` `=0.6.1`, its policy re-vendored, the controller granted `reference` (never
+      `get`) on Secrets in banlieue's namespace, ADR-0018's amendment closed (2026-11-27);
+      `controller-test` covers the refusal without the grant, the label apply that needs none,
+      and the create with it; `vap-test` checks the grant is reference-only and namespaced
+- [ ] Live: one libvirt host adopted, then bootstrapped from nothing (R-17), on banlieue v0.6.0
+      or later. First attempt 2026-11-19, adopting a libvirt Provider on the core cluster:
+      refused by banlieue's credentialsRef policy, which the kind tests did not install
 
 ### D. Firecracker (gated on banlieue roadmap 20)
 

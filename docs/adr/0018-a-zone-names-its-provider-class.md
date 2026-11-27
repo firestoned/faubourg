@@ -147,8 +147,18 @@ policy. Two consequences:
   `ProviderApplyRefused` and the API server's message, instead of retrying with no status; it is
   tried again after the retry interval. `controller-test` installs banlieue's policy (vendored in
   `test/banlieue/`).
-- Decision 6 depends on banlieue ADR-0157 (Proposed): a write that leaves `spec.connection`
-  unchanged is not checked, and `reference` on a Secret is enough to name it. When banlieue ships
-  it, faubourg's controller is granted `reference` on Secrets in banlieue's namespace, still
+- Decision 6 depends on banlieue ADR-0157: a write that leaves `spec.connection` unchanged is
+  not checked, and `reference` on a Secret is enough to name it. When banlieue ships it,
+  faubourg's controller is granted `reference` on Secrets in banlieue's namespace, still
   bounded to `faubourg-` names by `faubourg-provider-connection`, and this note says so. Until
   then libvirt zones are refused on a cluster that runs banlieue's policy.
+
+*Amended 2026-11-27:* banlieue ADR-0157 is Accepted and shipped in banlieue v0.6.0. faubourg
+pins `banlieue-api` `=0.6.1` and vendors that release's policy in `test/banlieue/`. The
+controller holds `reference`, and no other verb, on Secrets in banlieue's namespace
+(`deploy/rbac/controller.yaml`, Role `faubourg-controller-provider-credentials`). RBAC cannot
+narrow it to the `faubourg-` prefix, so `faubourg-provider-connection` is its bound, as banlieue
+ADR-0157 decision 3 requires. Labelling an adopted libvirt Provider needs no grant: it does not
+change the connection. `controller-test` proves both outcomes against banlieue's policy: without
+the binding the Host is `ProviderApplyRefused`, and with it the Provider is created. On a banlieue
+older than v0.6.0 libvirt zones are still refused, and fail closed the same way.

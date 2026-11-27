@@ -208,13 +208,14 @@ lifetime is recovered by re-bootstrapping it: delete its Job.
 
 ## A libvirt host
 
-!!! warning "Needs banlieue ADR-0157"
+!!! note "Needs banlieue v0.6.0 or later"
 
-    banlieue's admission policy `banlieue-provider-credentialsref-authorization` refuses any write
-    of a Provider that names a credential by someone who cannot read it, and faubourg's
-    controller reads no Secret. Until banlieue ships its ADR-0157 (a write that leaves the
-    connection alone is not checked, and `reference` on a Secret is enough to name it), a
-    libvirt Host fails with `ProviderApplyRefused` on a cluster that runs that policy.
+    banlieue's admission policy `banlieue-provider-credentialsref-authorization` admits a write
+    of a Provider that names a credential only from someone who may `get` or `reference` it
+    (banlieue ADR-0157, in banlieue v0.6.0). faubourg's controller reads no Secret: its RBAC
+    grants it `reference` on Secrets in banlieue's namespace, and its own
+    `faubourg-provider-connection` policy limits it to `faubourg-` names. With an older
+    banlieue, a libvirt Host fails with `ProviderApplyRefused`.
 
 A zone whose class has backend `libvirt` holds hosts that run libvirtd and no banlieue process:
 banlieue's libvirt provider runs in the cluster and dials each host over mutual TLS on 16514
